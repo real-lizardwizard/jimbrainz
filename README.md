@@ -199,6 +199,14 @@ It resolves the paths rather than trusting them, which is the point. <code>SLSKD
 
 </details>
 
+### Panels that behave like windows
+<details>
+<summary style="font-style:italic">Grab any edge, drag the title bar, and it remembers</summary>
+The log, downloads, candidates and metadata panels resize from any edge or corner rather than from a single grip in one corner, and they move by their title bar the way a window does. The edge you grab stays under the cursor — the CSS `resize` property drags in the element's own untransformed space, so on the centred dialogs the corner used to run away at double speed the further you pulled.
+
+Size and position are both remembered per panel, so a log window you widened once stays that width. A remembered spot that no longer fits — because the browser window is smaller today — comes back clamped to the edge with a strip of the title bar still on screen, rather than somewhere you can never reach it again. Resizing wins over moving where the two overlap at a title bar's own edges, and the controls inside a title bar still just click.
+</details>
+
 ### It works on a phone now
 <details>
 <summary style="font-style:italic">It really, really did not before</summary>

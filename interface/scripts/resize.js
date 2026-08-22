@@ -29,6 +29,33 @@
 //? of its own is a candidate; inline content is not.
 const PANELS = ['log-window', 'downloads-window', 'candidates-window', 'metadata-window'];
 
+/*
+  What you grab to MOVE each panel.
+
+  A title bar rather than the whole panel, for the obvious reason: these are full of lists you
+  scroll, text you select and buttons you press, and a panel that moves when you try to do any
+  of those is worse than one that does not move at all.
+
+  The log had no header until this went in - it was the only panel that did not say what it
+  was, so it gained one rather than being made an exception.
+*/
+const DRAG_HANDLES = {
+    'log-window': '#log-titlebar',
+    'downloads-window': '#downloads-toolbar',
+    'candidates-window': '#candidates-header',
+    'metadata-window': '#metadata-header',
+};
+
+/*
+  What inside a title bar is NOT a handle.
+
+  The controls, obviously - a drag must not start on a button you meant to press. Also the
+  metadata editor's path, which is the one piece of text in any of these bars that someone
+  wants to select and copy; it reads as text, so it has to behave as text.
+*/
+const NOT_A_HANDLE =
+    'button, a, input, select, textarea, [role="button"], .metadata-path';
+
 //? How close to an edge counts as grabbing it. 6px is about the smallest that doesn't feel
 //? fiddly with a mouse; the panels all have padding, so this zone sits in dead space rather
 //? than over their content.
@@ -155,12 +182,14 @@ function freeze(panel) {
 function thaw(panel) {
     if (!panel.dataset['resizeFrozen']) return;
 
-    //? Position only. Width and height are the remembered size and stay put - see the note
-    //? on SIZE_STORAGE_KEY for why one is kept and the other deliberately isn't.
-    for (const property of ['left', 'top', 'right', 'bottom', 'transform']) {
-        panel.style[property] = '';
-    }
+    /*
+      Only clears what was NOT chosen deliberately.
 
+      Both size and position are remembered now, and applySavedSize() puts them back on the
+      next open - so wiping them here would undo a move the moment the panel closed. What has
+      to go is the frozen flag, so the next open re-applies from storage rather than assuming
+      the inline styles still describe where the panel should be.
+    */
     delete panel.dataset['resizeFrozen'];
 }
 
@@ -171,10 +200,15 @@ function thaw(panel) {
   every session because it defaults to something too small is exactly the sort of small
   friction that makes an interface tiring.
 
-  SIZE is remembered; POSITION is not. That asymmetry is deliberate: a dialog pinned to
-  absolute viewport coordinates can end up entirely off screen after the browser window is
-  made smaller, with no way left to grab it. Size has no such failure mode, because it is
-  re-clamped against the viewport every time it is applied.
+  SIZE AND POSITION are both remembered now. Position used to be deliberately forgotten,
+  because a dialog pinned to absolute viewport coordinates can end up entirely off screen
+  after the browser window is made smaller, with no way left to grab it.
+
+  That reasoning held while position was only ever set as a side effect of freeze(). Now that
+  moving a panel is something you do ON PURPOSE, throwing the result away every time is the
+  worse failure - and the original objection is answered by clamping on restore exactly as
+  size already was. A panel whose remembered spot is off the edge of today's window comes back
+  at the edge instead of where it was.
 */
 const SIZE_STORAGE_KEY = 'jimbrainz-panel-sizes';
 
@@ -189,16 +223,24 @@ function readSizes() {
     }
 }
 
-function saveSize(id, width, height) {
+function writeEntry(id, patch) {
     try {
         const sizes = readSizes();
-        sizes[id] = { width: Math.round(width), height: Math.round(height) };
+        sizes[id] = { ...(sizes[id] || {}), ...patch };
         localStorage.setItem(SIZE_STORAGE_KEY, JSON.stringify(sizes));
     }
 
     catch {
-        // storage unavailable - the panel still resized, it just won't be remembered
+        // storage unavailable - the panel still moved or resized, it just won't be remembered
     }
+}
+
+function saveSize(id, width, height) {
+    writeEntry(id, { width: Math.round(width), height: Math.round(height) });
+}
+
+function savePosition(id, left, top) {
+    writeEntry(id, { left: Math.round(left), top: Math.round(top) });
 }
 
 /**
@@ -212,13 +254,27 @@ function applySavedSize(panel) {
     const saved = readSizes()[panel.id];
     if (!saved) return;
 
-    const width = Math.min(saved.width, window.innerWidth - 16);
-    const height = Math.min(saved.height, window.innerHeight - 16);
+    if (typeof saved.width === 'number' && typeof saved.height === 'number') {
+        panel.style.width = `${Math.min(saved.width, window.innerWidth - 16)}px`;
+        panel.style.height = `${Math.min(saved.height, window.innerHeight - 16)}px`;
+        panel.style.maxWidth = 'none';
+        panel.style.maxHeight = 'none';
+    }
 
-    panel.style.width = `${width}px`;
-    panel.style.height = `${height}px`;
-    panel.style.maxWidth = 'none';
-    panel.style.maxHeight = 'none';
+    if (typeof saved.left === 'number' && typeof saved.top === 'number') {
+        /*
+          Restoring a position means taking the panel out of its CSS anchoring, exactly as a
+          drag does - so it goes through freeze() rather than setting left/top on top of a
+          `right: 0` anchor, which would pin both edges and stretch the panel instead.
+        */
+        freeze(panel);
+
+        const origin = originOf(panel);
+        const wanted = clampToViewport(panel, saved.left, saved.top);
+
+        panel.style.left = `${wanted.left - origin.left}px`;
+        panel.style.top = `${wanted.top - origin.top}px`;
+    }
 }
 
 let drag = null;
@@ -232,7 +288,40 @@ function onPointerDown(event) {
     if (!panel) return;
 
     const edge = edgeAt(panel, event.clientX, event.clientY);
-    if (!edge) return;
+
+    /*
+      RESIZE WINS over move where the two overlap.
+
+      The title bar's own top and side edges are inside the resize zone, so without this the
+      panel would move when you meant to resize it from the very edge you naturally reach for.
+      Resizing is the more precise gesture and the harder one to start by accident, so it
+      takes precedence and moving gets everything else.
+    */
+    if (!edge) {
+        const movable = movablePanelFor(event.target);
+        if (!movable) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        freeze(movable);
+        const box = movable.getBoundingClientRect();
+        const origin = originOf(movable);
+
+        move = {
+            panel: movable,
+            origin,
+            //? where in the title bar the pointer grabbed, so the panel does not jump to
+            //? centre itself under the cursor on the first move
+            grabX: event.clientX - box.left,
+            grabY: event.clientY - box.top,
+        };
+
+        movable.setPointerCapture?.(event.pointerId);
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'grabbing';
+        return;
+    }
 
     //? Only now, so a click anywhere else in the panel is untouched.
     event.preventDefault();
@@ -265,6 +354,18 @@ function onPointerDown(event) {
 }
 
 function onPointerMove(event) {
+    if (move) {
+        const { panel, origin, grabX, grabY } = move;
+        const wanted = clampToViewport(panel, event.clientX - grabX, event.clientY - grabY);
+
+        //? style.left is offsetParent-relative; the clamp works in viewport coordinates. The
+        //? log and downloads panels are absolute inside their dropdown wrapper, so the two
+        //? are not the same number - see originOf().
+        panel.style.left = `${wanted.left - origin.left}px`;
+        panel.style.top = `${wanted.top - origin.top}px`;
+        return;
+    }
+
     //? Not dragging: just advertise the affordance. Without a cursor change there is no way
     //? to discover that the edges are grabbable at all.
     if (!drag) {
@@ -311,7 +412,58 @@ function onPointerMove(event) {
     panel.style.top = `${top - origin.top}px`;
 }
 
+/* ===== moving ===== */
+
+let move = null;
+
+/** The panel this event should MOVE, or null. */
+function movablePanelFor(target) {
+    if (!(target instanceof Element)) return null;
+
+    for (const [id, selector] of Object.entries(DRAG_HANDLES)) {
+        const handle = target.closest(`#${id} ${selector}`);
+        if (handle) {
+            //? the title bar's own controls are not drag handles
+            if (target.closest(NOT_A_HANDLE)) return null;
+            return document.getElementById(id);
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Keep a panel reachable.
+ *
+ * A window dragged fully off screen is gone - there is no OS window list to get it back from,
+ * and the only remedy would be clearing storage. Clamping to leave a strip of the title bar
+ * on screen means whatever you do with the pointer, you can always drag it back.
+ */
+function clampToViewport(panel, left, top) {
+    const box = panel.getBoundingClientRect();
+    const KEEP_VISIBLE = 64;
+
+    return {
+        left: Math.min(
+            Math.max(left, KEEP_VISIBLE - box.width),
+            window.innerWidth - KEEP_VISIBLE,
+        ),
+        //? never above the top: a title bar dragged off the top edge cannot be grabbed again
+        top: Math.min(Math.max(top, 0), window.innerHeight - KEEP_VISIBLE),
+    };
+}
+
 function onPointerUp() {
+    if (move) {
+        const box = move.panel.getBoundingClientRect();
+        savePosition(move.panel.id, box.left, box.top);
+
+        move = null;
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+        return;
+    }
+
     if (!drag) return;
 
     saveSize(drag.panel.id, drag.panel.offsetWidth, drag.panel.offsetHeight);

@@ -255,6 +255,35 @@ real tracklist → enqueue → poller watches transfers → organizer tags and f
 - **A CSS `resize` grip does not track the cursor on a transformed element.** It drags in the
   element's own untransformed space, so with `translate(-50%, -50%)` the corner runs away at
   double speed. That is why resizing is done in JS now — see `interface/scripts/resize.js`.
+
+### Panels move as well as resize
+
+- **Moving is by a TITLE BAR, never by the whole panel.** These panels are full of lists you
+  scroll, text you select and buttons you press; one that slides away when you try any of
+  those is worse than one that never moved. `DRAG_HANDLES` names the bar per panel and
+  `NOT_A_HANDLE` exempts the controls inside it.
+- **The log gained a title bar rather than being made an exception.** It was the only floating
+  panel that did not say what it was, so it wanted one anyway.
+- **`.metadata-path` is exempt from the handle AND from `user-select: none`.** It is the album's
+  full filesystem path and the one string in any title bar people actually copy — it is what
+  you paste into a terminal when an album is misfiled. Making the bar unselectable would have
+  quietly taken that away, so it keeps a text cursor and starts no drag.
+- **Resize WINS over move where they overlap.** A title bar's own top and side edges sit inside
+  the 6px resize zone. Resizing is the more precise gesture and the harder one to begin by
+  accident, so it takes precedence and moving gets everything else.
+- **Position is persisted now, and the old objection is answered by clamping, not by
+  forgetting.** Position used to be deliberately discarded because a dialog pinned to absolute
+  viewport coordinates can end up entirely off screen after the window shrinks, with no OS
+  window list to recover it from. That held while position was only ever a side effect of
+  `freeze()`; now that moving is deliberate, throwing it away every time is the worse failure.
+  `clampToViewport()` keeps a 64px strip of the bar reachable. **Verified:** a position stored
+  at (1300, 820) restores at (836, 536) in a 900×600 window — exactly the 64px strip on both
+  axes.
+- **`applySavedSize()` restores position through `freeze()`, not by writing `left`/`top`
+  directly.** These panels are anchored with `right: 0`; setting `left` on top of that pins
+  both edges and stretches the panel instead of moving it.
+- **`thaw()` only deletes the frozen flag.** It used to wipe the inline geometry, which would
+  now undo a move the instant the panel closed.
 - **An animation loop only looks smooth if its end state is pixel-identical to its start.**
   The loading sweep sets a tile width and travels exactly one tile; anything else pops on
   every cycle. Percentage `background-position` will not do this — it positions relative to
@@ -573,6 +602,18 @@ Each of these cost real time. Don't rediscover them.
   header that also holds a "clear" button, so a lone `░` wrapped to a second line and the
   column read as broken. The general lesson survives the decoration: **anything in a
   fixed-width column needs measuring at that width**, not eyeballing.
+- **Removing a UI element leaves references behind, and a module-scope `ReferenceError`
+  aborts the REST of the handler.** The download-profile dropdown went in v0.5 but two
+  `profileControl.classList.remove('open')` calls stayed, referencing a binding that no
+  longer existed anywhere. The damaging one was in `closeOtherDropdowns()` — the bridge
+  function the Preact downloads panel calls as it opens — where it threw on the *first* line,
+  so the `setLogOpen(false)` beneath it never ran and **opening downloads left the log open**,
+  defeating the one invariant that function exists to hold. The other, in the log toggle, threw
+  *after* `setLogOpen()` and so did nothing visible at all, which is why both survived several
+  releases. Found in the console while verifying something unrelated. **After deleting an
+  element, grep for its variable — and note that a dead reference positioned late in a handler
+  is invisible, while the same reference one line earlier is a broken feature.**
+
 - **`hidden` did nothing to any badge.** `.log-unread-badge` and `.signals-badge` both set
   `display`, which beats the browser's `[hidden] { display: none }` — so all three badges sat
   on screen showing `0` while their JS believed it had hidden them. Found by checking
@@ -797,7 +838,18 @@ same-origin with the app by design.
     so `img.complete` is false and `currentSrc` empty even though the bytes serve fine —
     cover art looked broken twice this session and wasn't. `useEffect` also flushes late, so
     a mount effect can land *after* a synthetic input and clobber it. **Take a screenshot to
-    force a paint before measuring either.** (That second one is why the metadata editor's
+    force a paint before measuring either.**
+  - **A hidden pane freezes every CSS transition mid-flight, and it reads exactly like a
+    layout bug.** This cost real time while verifying the panel drag: a restored panel sat
+    permanently at `scale(0.98)`, 12px off its saved position, with `getAnimations()`
+    reporting `playState: "running"` forever on a 0.14s transition. It looked like `freeze()`
+    fighting the `@starting-style` entrance. It was not — `document.hidden` was `true` and
+    **rAF fired 0 frames in 3 seconds**, so the transition simply never advanced. One
+    screenshot to force a paint and it settled to `transform: none` at exactly the saved
+    610×520 / (434, 394). **The tell is a transition stuck at its FROM value with playState
+    "running"** — check `document.hidden` and count rAF frames before believing any
+    transform, position or size you measured mid-transition. Note the tab being *fronted* via
+    `tabs_select` was not sufficient here; the screenshot was. (That second one is why the metadata editor's
     re-seed effect skips its mount run — which made it genuinely robust, not just testable.)
   - **It serves stale composites.** It has shown a panel as transparent, and shown pre-fix
     state after a reload, more than once.

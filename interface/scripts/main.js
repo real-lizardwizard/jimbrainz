@@ -193,7 +193,10 @@ window.jimbrainz = window.jimbrainz || {};
 
 // called by the panel when it opens - only one dropdown should be open at a time
 window.jimbrainz.closeOtherDropdowns = () => {
-    profileControl.classList.remove('open');
+    //? There used to be a download-profile dropdown to close here too. It was replaced by the
+    //? settings tab in v0.5 and the element went with it, but these two calls stayed - and
+    //? since this one threw on its FIRST line, the log was never closed at all. Opening the
+    //? downloads panel left both open, which is the exact thing this function exists to stop.
     setLogOpen(false);
 };
 
@@ -291,10 +294,14 @@ function isLogOpenSaved() {
  */
 setLogOpen(isLogOpenSaved() || loadPreferences().logOpenOnStart);
 
+document.getElementById('log-close-button').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setLogOpen(false);
+});
+
 logToggleButton.addEventListener('click', (e) => {
     e.stopPropagation();
     setLogOpen(!isLogOpen());
-    profileControl.classList.remove('open');
 });
 
 document.addEventListener('click', (e) => {

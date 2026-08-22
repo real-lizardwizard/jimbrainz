@@ -2238,6 +2238,79 @@ h3.glow.green{
     padding: 10px;
 }
 
+/* ============================================================================
+ * ? PANEL TITLE BARS - the grab handle for moving a floating panel
+ *
+ * Moving is by the title bar rather than by the whole panel, and that is not a limitation:
+ * these panels are full of lists you scroll, text you select and buttons you press, and one
+ * that slides away when you try any of those is worse than one that never moved.
+ *
+ * `grab` is the whole affordance - there is no other clue that a panel can be moved, so the
+ * cursor has to be the one that says so. The controls inside a title bar keep their pointer
+ * cursor, because resize.js refuses to start a drag on them.
+ * ==========================================================================*/
+
+#log-titlebar,
+#downloads-toolbar,
+#candidates-header,
+#metadata-header {
+    cursor: grab;
+    /* a drag that selects the title text instead of moving the window feels broken */
+    user-select: none;
+}
+
+#log-titlebar button,
+#downloads-toolbar button,
+#candidates-header button,
+#metadata-header button {
+    cursor: pointer;
+    user-select: auto;
+}
+
+/*
+  The album's full path stays selectable, and stays out of the drag.
+
+  It was copyable before these panels could be moved, and it is the one string in a title bar
+  anyone actually wants on their clipboard - it is what you paste into a terminal when an
+  album is misfiled. `user-select: none` on the bar would have quietly taken that away, so
+  resize.js excludes it from the handle (NOT_A_HANDLE) and it keeps a text cursor.
+*/
+.metadata-path {
+    cursor: text;
+    user-select: text;
+}
+
+/* the log's own bar, which it did not have until panels became movable */
+.panel-titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    flex-shrink: 0;
+    padding-bottom: var(--space-2);
+    margin-bottom: var(--space-2);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.panel-titlebar h3 {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    color: var(--white-tertiary-text);
+}
+
+#log-close-button {
+    background: transparent;
+    border: 0;
+    padding: 0 var(--space-1);
+    color: var(--white-tertiary-text);
+    font-size: var(--text-sm);
+    line-height: 1;
+    transition: var(--transition-colors);
+}
+
+#log-close-button:hover { color: var(--white-text); }
+
 #candidates-header {
     display: flex;
     align-items: center;

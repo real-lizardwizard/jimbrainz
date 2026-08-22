@@ -41,6 +41,13 @@
                     <span id="log-unread-badge" class="log-unread-badge" hidden>0</span>
                 </button>
                 <div id="log-window">
+                    <!-- The log was the only floating panel with no header. It needed one to
+                         be draggable like the others, and it wanted one anyway: every other
+                         panel says what it is. -->
+                    <div id="log-titlebar" class="panel-titlebar">
+                        <h3 class="text default">Event log</h3>
+                        <button type="button" id="log-close-button" title="Close the log">✕</button>
+                    </div>
                     <div class="scrollable" id="logs-scrollable"></div>
                 </div>
             </div>
