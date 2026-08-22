@@ -342,12 +342,20 @@ def score_candidate(candidate: dict, expected: dict, format_preference: str = "p
         "track_mapping": mapping,
         "detected_edition_tags": sorted(detect_edition_tags(candidate["directory"])),
         "formats": sorted({file_extension(split_remote_path(f.get("filename", ""))[1]) for f in files}),
-        #? Peer stats, surfaced so the UI can show and filter on them. slskd's uploadSpeed is
-        #? the peer's upload = our download, in BYTES/sec - slskd's own web UI renders it as
+        #? Peer stats, surfaced so the UI can show and filter on them.
+        #?
+        #? UNITS: BYTES/sec, not bits. slskd's own web UI renders it as
         #? `formatBytes(response.uploadSpeed)/s`, and the thresholds in score_peer() are only
         #? sensible read that way (1 MB/s fast, 100 KB/s decent; as bits those would be 125 and
         #? 12.5 KB/s). A comment here previously said bits, which would invite someone to
         #? "correct" the display by a factor of eight.
+        #?
+        #? MEANING: the peer's average upload speed over their whole history, to everyone, as
+        #? reported by Soulseek - NOT the rate this transfer will run at. It is divided among
+        #? however many people they are serving at once and averaged over conditions that have
+        #? since changed, so it reads high far more often than not. An earlier comment here
+        #? called it "our download speed", which is what the interface then went and claimed
+        #? too. score_peer() weights it accordingly: 0.2 at most, inside a signal worth 0.08.
         "upload_speed": response.get("uploadSpeed", 0) or 0,
         "queue_length": response.get("queueLength", 0) or 0,
         "has_free_slot": bool(response.get("hasFreeUploadSlot")),

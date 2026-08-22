@@ -131,10 +131,15 @@ export interface Candidate {
   detected_edition_tags: string[]
   formats: string[]
   /**
-   * The peer's upload speed = our download speed, in BYTES/sec.
+   * The peer's average upload speed over their whole history, in BYTES/sec.
    *
-   * Not bits — slskd's own web UI renders this field as `formatBytes(uploadSpeed)/s`, and
-   * src/matching.py's peer thresholds only make sense as bytes. Do not divide by eight.
+   * NOT the rate a transfer from them will run at, and it should never be labelled as though
+   * it were. Soulseek reports it per user, so it is split between everyone they are serving
+   * at once and averaged over conditions that no longer apply — it reads high far more often
+   * than it matches. `has_free_slot` and `queue_length` predict the real thing far better.
+   *
+   * Bytes, not bits — slskd's own web UI renders this field as `formatBytes(uploadSpeed)/s`,
+   * and src/matching.py's peer thresholds only make sense as bytes. Do not divide by eight.
    */
   upload_speed: number
   queue_length: number

@@ -2544,6 +2544,10 @@ span.red { color: var(--red-text); }
     display: flex;
     flex-direction: row;
     align-items: center;
+    /* Three chips that were short while the speed read `▼ 1.2 MB/s`. It says `peer avg
+       1.2 MB/s` now - see peerSpeedLabel() for why - which is long enough to overflow a
+       375px row, and this panel is inside a fixed-width window with nowhere to overflow to. */
+    flex-wrap: wrap;
     gap: 10px;
     margin-top: 4px;
     font-family: var(--font-family-condensed);
@@ -2553,6 +2557,8 @@ span.red { color: var(--red-text); }
 .candidate-speed {
     color: var(--main-text);
     font-weight: var(--font-medium);
+    /* it carries a tooltip explaining what the number is and is not */
+    cursor: help;
 }
 
 .candidate-slot.free {

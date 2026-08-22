@@ -1039,6 +1039,32 @@ function formatSpeed(bytesPerSecond) {
     return `${(kb / 1024).toFixed(1)} MB/s`;
 }
 
+/*
+ * How a peer's advertised speed is labelled, which is a correctness question rather than a
+ * cosmetic one.
+ *
+ * This used to render as `▼ 1.2 MB/s`. A download arrow reads as a promise about YOUR
+ * transfer, and this number is not that and cannot be: it is the peer's average upload speed
+ * across their whole history, to everyone, as reported by Soulseek. It is spread over however
+ * many people they are uploading to at once, it averages over conditions that no longer
+ * apply, and your actual rate is bounded by the narrowest point on the whole path anyway.
+ * People noticed it never matched, which is the sort of thing that makes you stop trusting
+ * every other number on the row too.
+ *
+ * The honest fix is to say what it is. The slot and queue chips beside it are the better
+ * predictors of what you will actually get, and they are already there.
+ */
+const PEER_SPEED_HINT =
+    'The peer\'s average upload speed across all their transfers, as reported by Soulseek. '
+    + 'Not a prediction of your download rate: it is shared between everyone they are '
+    + 'uploading to and averaged over their whole history. The slot and queue beside it are '
+    + 'better guides to what you will actually get.';
+
+function peerSpeedLabel(bytesPerSecond) {
+    //? 'peer avg unknown' reads like a broken string; say the thing that is unknown instead.
+    return bytesPerSecond ? `peer avg ${formatSpeed(bytesPerSecond)}` : 'peer avg unknown';
+}
+
 function formatSize(bytes) {
     if (!bytes) return '';
     const mb = bytes / (1024 * 1024);
@@ -1250,7 +1276,7 @@ function renderCandidates() {
                         ${sizeText ? `<span class="text default-muted">·</span><span class="text default-secondary">${sizeText}</span>` : ''}
                     </div>
                     <div class="candidate-peer">
-                        <span class="candidate-speed">▼ ${formatSpeed(candidate.upload_speed)}</span>
+                        <span class="candidate-speed" title="${PEER_SPEED_HINT}">${peerSpeedLabel(candidate.upload_speed)}</span>
                         <span class="candidate-slot ${candidate.has_free_slot ? 'free' : 'busy'}">${candidate.has_free_slot ? 'free slot' : 'no free slot'}</span>
                         <span class="text default-muted">queue ${candidate.queue_length}</span>
                     </div>

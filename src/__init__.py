@@ -14,4 +14,4 @@ value here is a wrong answer to "what version are you running", which is the fir
 asked about any bug report.
 """
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"

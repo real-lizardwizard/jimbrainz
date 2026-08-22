@@ -66,7 +66,7 @@ interface/         vanilla JS/CSS. Still the served page; main.js is shrinking a
                    separately - hard-refresh when verifying a palette change.
   dist/            BUILT from ui/, gitignored. Not present in a fresh checkout.
 ui/                Preact + Vite + TypeScript. New work goes here — see below.
-tests/             305 tests, all Python, all fixture-driven
+tests/             342 tests, all Python, all fixture-driven
 ```
 
 API routes are prefixed **`/jimbrainz/`** (renamed from `/lidbrainz/`).
@@ -256,6 +256,16 @@ real tracklist → enqueue → poller watches transfers → organizer tags and f
   element's own untransformed space, so with `translate(-50%, -50%)` the corner runs away at
   double speed. That is why resizing is done in JS now — see `interface/scripts/resize.js`.
 
+- **An animation loop only looks smooth if its end state is pixel-identical to its start.**
+  The loading sweep sets a tile width and travels exactly one tile; anything else pops on
+  every cycle. Percentage `background-position` will not do this — it positions relative to
+  (container − image), not to the image.
+- **Capitalization: sentence case in the markup, and let CSS do any uppercasing.** Several
+  labels are rendered uppercase by `text-transform`, so the source string still has to read
+  correctly when that rule is not applied. Proper nouns keep their own casing, and **`slskd`
+  and `jimbrainz` are lowercase brand names** — never sentence-case them, rephrase so they are
+  not sentence-initial instead.
+
 ### Panels move as well as resize
 
 - **Moving is by a TITLE BAR, never by the whole panel.** These panels are full of lists you
@@ -284,15 +294,6 @@ real tracklist → enqueue → poller watches transfers → organizer tags and f
   both edges and stretches the panel instead of moving it.
 - **`thaw()` only deletes the frozen flag.** It used to wipe the inline geometry, which would
   now undo a move the instant the panel closed.
-- **An animation loop only looks smooth if its end state is pixel-identical to its start.**
-  The loading sweep sets a tile width and travels exactly one tile; anything else pops on
-  every cycle. Percentage `background-position` will not do this — it positions relative to
-  (container − image), not to the image.
-- **Capitalization: sentence case in the markup, and let CSS do any uppercasing.** Several
-  labels are rendered uppercase by `text-transform`, so the source string still has to read
-  correctly when that rule is not applied. Proper nouns keep their own casing, and **`slskd`
-  and `jimbrainz` are lowercase brand names** — never sentence-case them, rephrase so they are
-  not sentence-initial instead.
 
 ### Browsing a discography, and ordering results
 
@@ -386,6 +387,30 @@ on one — the whole thing was the desktop layout with `flex-wrap` turned on.
 - **Measured, at 375px:** header 161→47px, search form 450→146px, result cards 280→99px,
   first result 770→343px from the top. No horizontal overflow anywhere, no control off-screen
   in any view, and desktop is untouched (checked at 1280px after the cascade move above).
+
+### The peer's advertised speed is not your download speed
+
+- **`upload_speed` is the peer's average upload rate over their whole history, to everyone —
+  not a prediction of this transfer.** Soulseek reports it per user, so it is divided among
+  however many people they are serving at once and averaged over conditions that no longer
+  apply. It reads high far more often than it matches, which is what prompted this.
+- **It used to render as `▼ 1.2 MB/s`, and a download arrow is a promise.** It now reads
+  `peer avg 1.2 MB/s` with a tooltip saying what it is and is not. This is a correctness fix,
+  not a cosmetic one: a number that visibly never matches teaches you to distrust every other
+  number on the row, including the match score, which is the one worth trusting.
+  **Do not "simplify" the label back to a bare rate.**
+- **`has_free_slot` and `queue_length` are the better predictors and are already on the row**,
+  which is why the fix was to relabel rather than to hide anything.
+- **The units comment stays.** BYTES/sec, not bits — see the note in `matching.py`. Two
+  separate things were once wrong here: the units (fixed earlier) and the meaning (fixed now).
+  An older comment calling it "our download speed" is what the interface then went and claimed.
+- **jimbrainz already weights it correctly**, and that did not need changing: `score_peer()`
+  grants at most 0.2 for speed, and `peer` carries **0.08 of 1.0** in `WEIGHTS` — the lowest
+  of the six signals. It is an availability tiebreaker, never a ranking criterion.
+- **`.candidate-peer` had to gain `flex-wrap: wrap`.** The three chips fitted while the speed
+  was `▼ 1.2 MB/s`; the longer label overflows a 159px row at 375px, and the panel is inside a
+  fixed-width window with nowhere to overflow to. Measured after: `scrollWidth === clientWidth`
+  on every row, document scroll width 375, two lines per row.
 
 ### The downloads panel's optimistic overlays
 
@@ -838,7 +863,8 @@ same-origin with the app by design.
     so `img.complete` is false and `currentSrc` empty even though the bytes serve fine —
     cover art looked broken twice this session and wasn't. `useEffect` also flushes late, so
     a mount effect can land *after* a synthetic input and clobber it. **Take a screenshot to
-    force a paint before measuring either.**
+    force a paint before measuring either.** (That second one is why the metadata editor's
+    re-seed effect skips its mount run — which made it genuinely robust, not just testable.)
   - **A hidden pane freezes every CSS transition mid-flight, and it reads exactly like a
     layout bug.** This cost real time while verifying the panel drag: a restored panel sat
     permanently at `scale(0.98)`, 12px off its saved position, with `getAnimations()`
@@ -849,8 +875,7 @@ same-origin with the app by design.
     610×520 / (434, 394). **The tell is a transition stuck at its FROM value with playState
     "running"** — check `document.hidden` and count rAF frames before believing any
     transform, position or size you measured mid-transition. Note the tab being *fronted* via
-    `tabs_select` was not sufficient here; the screenshot was. (That second one is why the metadata editor's
-    re-seed effect skips its mount run — which made it genuinely robust, not just testable.)
+    `tabs_select` was not sufficient here; the screenshot was.
   - **It serves stale composites.** It has shown a panel as transparent, and shown pre-fix
     state after a reload, more than once.
 
@@ -977,7 +1002,7 @@ the page, and ported panels mount into it via one extra module script.
 
 | ported | still vanilla |
 | --- | --- |
-| Downloads panel, tab shell, library view, metadata editor, metadata queue, delete dialog | search bar, releases grid, filter column, candidates panel, log, profile |
+| Downloads panel, tab shell, library view, metadata editor, metadata queue, delete dialog | search bar, releases grid, filter column, candidates panel, log |
 
 **How the two halves coexist:**
 
@@ -1043,7 +1068,7 @@ compile time.
 
 ```bash
 .venv/bin/python -m src.main          # needs .env; DB_PATH=.devdata/jimbrainz.db
-.venv/bin/python -m pytest tests/ -q  # 305 tests
+.venv/bin/python -m pytest tests/ -q  # 342 tests
 ```
 
 Frontend, from `ui/`. **Needs Node `^20.19.0 || >=22.12.0`** — see the npm gotcha above:
@@ -1070,7 +1095,7 @@ HMR — **not** the real page. The real page is still `interface/index.html` ser
 
 ## What the tests cannot tell you
 
-All 305 tests are fixture-driven. **Nothing has ever talked to a real slskd.** The parts most
+All 342 tests are fixture-driven. **Nothing has ever talked to a real slskd.** The parts most
 likely to break on deployment are exactly the parts tests can't reach:
 
 - slskd transfer `state` strings. **This one already came true**: `"Completed, Rejected"` was
@@ -1106,10 +1131,14 @@ A green suite here means the logic is sound, not that it works against real infr
    foundation and every surface touched in the overhaul are on it, but `main.css` still holds
    legacy `em` sizes in corners nothing has revisited. Convert them as you touch them —
    a mechanical sweep of 3,800 lines would be a large untestable diff for little gain.
-7. **The candidates panel is the one surface the overhaul could not verify.** It needs a live
-   slskd, and there has never been one (see "What the tests cannot tell you"). Its chrome was
-   restyled with everything else and it uses the same shared classes, so it should be right —
-   but it has not been *seen*. Look at it the first time slskd is connected.
+7. **The candidates panel has now been SEEN, but still not against a real slskd.** It was
+   rendered by stubbing the `find_candidates` fetch in the browser and driving the real
+   `renderCandidates()` path with three fabricated peers — the chrome, the score column, the
+   signal chips, the filters and the mobile layout all check out at 1440px and 375px. What
+   that cannot tell you is anything about real Soulseek data: whether real directory names
+   overflow, what genuine `signals` distributions look like, or whether the query box and
+   re-search behave against a live search. **Stubbing the fetch is a cheap way to look at
+   this panel again** — it needs no slskd and takes one `window.fetch` override.
 
 ### Deliberately not built
 
