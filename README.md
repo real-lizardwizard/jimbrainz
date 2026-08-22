@@ -103,6 +103,8 @@ Most tools use Artist objects as the "main" form of adding and storing data, i d
 Each peer's files get grouped into (user, folder) candidates and scored on track count, fuzzy title match against the real tracklist, track durations, format/bitrate, peer health, and edition/year. You see a score breakdown per candidate so it's obvious <em>why</em> one ranked above another — and can filter by free slot, complete albums only, format, or minimum score.
 <br><br>
 The speed on a candidate reads <code>peer avg</code> because that is what Soulseek reports: the peer's average upload rate across their whole history, to everyone. It is split between everyone they're serving at once and averaged over conditions that have since changed, so it is not a prediction of your transfer and routinely reads high. The free-slot and queue figures beside it are the better guide. jimbrainz weights it accordingly — peer health is the lowest of the six signals, an availability tiebreaker rather than a ranking criterion.
+<br><br>
+Once you've actually downloaded from someone, the row leads with <code>you got 780 KB/s</code> instead — what jimbrainz measured itself while bytes were moving, with queue time excluded. Nothing in the Soulseek protocol will tell you a transfer's speed before it starts, so this is the closest thing to an answer there is, and it's the one number on the row that was measured rather than claimed. It builds up as you use it: peers you've never downloaded from simply don't have it.
 </details>
 
 ### An artist's discography, in order

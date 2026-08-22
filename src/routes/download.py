@@ -117,10 +117,13 @@ async def find_candidates(request: Request, body: FindCandidatesRequest):
                 extra={"frontend": True, "src": "slskd"},
             )
 
+        serialized = [_serialize_candidate(c) for c in candidates]
+        await _attach_measured_speeds(request, serialized)
+
         return {
             "query": query,
             "response_count": len(responses),
-            "candidates": [_serialize_candidate(c) for c in candidates],
+            "candidates": serialized,
         }
 
     except HTTPException:
@@ -129,6 +132,42 @@ async def find_candidates(request: Request, body: FindCandidatesRequest):
     except Exception as e:
         logger.error(f"Exception in /find_candidates endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Error searching slskd: {e}")
+
+
+async def _attach_measured_speeds(request: Request, candidates: list[dict]) -> None:
+    """
+    Add what we have actually measured from each peer, where we have measured anything.
+
+    Separate from _serialize_candidate because that one is pure and this one reads the
+    database, and because it is one query for the whole list rather than one per candidate.
+
+    Failure here is silent by design. Most peers have never been downloaded from, so a
+    candidate with no measurement is the ordinary case and already renders correctly - which
+    means a degraded read looks exactly like a peer nobody has met, rather than like an error.
+    The advertised figure and the slot/queue chips are all still there.
+    """
+    if not candidates:
+        return
+
+    try:
+        measured = await request.app.state.store.peer_speeds(
+            [c["username"] for c in candidates]
+        )
+
+    except Exception as e:
+        logger.debug(f"could not read measured peer speeds: {e}")
+        return
+
+    for candidate in candidates:
+        row = measured.get(candidate["username"])
+        if not row:
+            continue
+
+        candidate["measured_speed"] = row["avg_bytes_sec"]
+        #? How many transfers that average stands on, so the UI can distinguish "one lucky
+        #? download" from a settled figure instead of presenting both as equally certain.
+        candidate["measured_samples"] = row["samples"]
+        candidate["measured_at"] = row["last_seen"]
 
 
 def _serialize_candidate(candidate: dict) -> dict:

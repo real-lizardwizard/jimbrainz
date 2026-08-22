@@ -31,6 +31,7 @@ from pathlib import Path
 
 from src.config import Config
 from src.logger import logger
+from src.peer_speed import merge_observation
 
 
 SCHEMA = """
@@ -97,6 +98,26 @@ CREATE TABLE IF NOT EXISTS album_review (
     ignored_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_review_source ON album_review(source, reviewed_at);
+
+CREATE TABLE IF NOT EXISTS peer_speed (
+    -- What a peer actually gave us, measured, so the candidate row can show something
+    -- better than the peer's own advertised average (see src/peer_speed.py for why that
+    -- number is close to meaningless as a prediction).
+    --
+    -- Keyed on username alone, because that is the only durable identity Soulseek exposes -
+    -- there is no stable peer id, and the same person reappears under the same name.
+    --
+    -- Deliberately NOT a row per transfer. The raw samples would be more flexible, but this
+    -- table exists to answer one question on a list that renders per keystroke, and a
+    -- running aggregate answers it with a single indexed read. `samples` is kept so the UI
+    -- can say how much it is standing on rather than presenting one lucky transfer as
+    -- settled fact.
+    username        TEXT PRIMARY KEY,
+    samples         INTEGER NOT NULL,
+    avg_bytes_sec   REAL NOT NULL,
+    last_bytes_sec  REAL NOT NULL,
+    last_seen       TEXT NOT NULL
+);
 """
 
 #? queued/downloading/complete are phase 2. organizing/organized land with the organizer.
@@ -608,6 +629,93 @@ class JobStore:
         except Exception as e:
             logger.error(f"failed to count new imports: {e}")
             return {"count": 0, "albums": [], "tracking_enabled": False}
+
+    async def record_peer_speed(self, username: str, rate: float) -> bool:
+        """
+        Fold one measured transfer rate into a peer's running figure.
+
+        Never raises. This is bookkeeping hung off a download that has already finished, so a
+        failure here must not colour the outcome of the job itself - the album arrived either
+        way, and the poller has nothing useful to do about a write that did not land.
+        """
+        if not self.available or not username or rate <= 0:
+            return False
+
+        def write():
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT samples, avg_bytes_sec FROM peer_speed WHERE username = ?",
+                    (username,),
+                ).fetchone()
+
+                average, samples = merge_observation(
+                    row["avg_bytes_sec"] if row else None,
+                    row["samples"] if row else 0,
+                    rate,
+                )
+
+                connection.execute(
+                    """
+                    INSERT INTO peer_speed
+                        (username, samples, avg_bytes_sec, last_bytes_sec, last_seen)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(username) DO UPDATE SET
+                        samples = excluded.samples,
+                        avg_bytes_sec = excluded.avg_bytes_sec,
+                        last_bytes_sec = excluded.last_bytes_sec,
+                        last_seen = excluded.last_seen
+                    """,
+                    (username, samples, average, rate, _now()),
+                )
+
+            return True
+
+        try:
+            return await asyncio.to_thread(write)
+
+        except Exception as e:
+            logger.error(f"failed to record the speed measured from {username}: {e}")
+            return False
+
+    async def peer_speeds(self, usernames: list[str]) -> dict[str, dict]:
+        """
+        Measured rates for the peers named, keyed by username. Absent peers are simply absent.
+
+        Takes the list rather than returning the whole table: a candidate list is at most a
+        few dozen peers while the table grows for the life of the install, and the caller
+        wants a lookup either way.
+
+        Returns {} on any failure. A candidate row without this chip is the ordinary case -
+        most peers have never been downloaded from - so a degraded read looks exactly like a
+        peer nobody has met, which is the correct thing for it to look like.
+        """
+        if not self.available or not usernames:
+            return {}
+
+        unique = sorted(set(u for u in usernames if u))
+        if not unique:
+            return {}
+
+        def read():
+            placeholders = ",".join("?" * len(unique))
+
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT username, samples, avg_bytes_sec, last_bytes_sec, last_seen
+                    FROM peer_speed WHERE username IN ({placeholders})
+                    """,
+                    unique,
+                ).fetchall()
+
+            return {r["username"]: dict(r) for r in rows}
+
+        try:
+            return await asyncio.to_thread(read)
+
+        except Exception as e:
+            logger.error(f"failed to read measured peer speeds: {e}")
+            return {}
 
 
 #? slskd reports a stopped transfer as "Completed, <substate>". "Succeeded" is the only good

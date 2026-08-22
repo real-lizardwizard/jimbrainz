@@ -11,11 +11,13 @@ Phase 3 hooks the organizer onto the queued -> complete transition.
 """
 
 import asyncio
+import time
 from pathlib import Path
 
 from src.config import Config
 from src.logger import logger
 from src.organizer import organize_job
+from src.peer_speed import RateAccumulator, measured_rate, observe
 from src.store import index_transfers_by_user, summarize_transfers
 
 
@@ -27,11 +29,28 @@ POLL_INTERVAL_SECONDS = 5.0
 UNMATCHED_GRACE_POLLS = 24
 
 
-async def poll_downloads_once(slskd_client, store, missing_counts: dict[int, int]) -> None:
+async def poll_downloads_once(
+    slskd_client,
+    store,
+    missing_counts: dict[int, int],
+    rate_samples: dict[int, RateAccumulator] | None = None,
+) -> None:
+    """
+    One reconciliation pass.
+
+    `rate_samples` carries the peer-speed measurement across polls, the same way
+    `missing_counts` carries the grace period. Optional so the existing callers and tests that
+    do not care about measurement keep working unchanged; when it is omitted, nothing is
+    measured and nothing is recorded.
+    """
     open_jobs = await store.open_jobs()
 
     if not open_jobs:
         missing_counts.clear()
+        #? Nothing is in flight, so no half-finished measurement can still be valid. Clearing
+        #? here is what stops the dict growing for the life of the process.
+        if rate_samples is not None:
+            rate_samples.clear()
         return
 
     downloads = await slskd_client.get_downloads()
@@ -53,13 +72,25 @@ async def poll_downloads_once(slskd_client, store, missing_counts: dict[int, int
                 )
                 await store.update_status(job_id, "failed", "no transfers reported by slskd")
                 missing_counts.pop(job_id, None)
+                if rate_samples is not None:
+                    rate_samples.pop(job_id, None)
 
             continue
 
         missing_counts.pop(job_id, None)
 
+        #? Sampled on every matched poll, whatever the job's state. Intervals where the
+        #? counter did not move are excluded inside observe() rather than here, because
+        #? "queued" and "moving but slskd hasn't refreshed" are indistinguishable from out
+        #? here and must be treated identically.
+        if rate_samples is not None:
+            rate_samples[job_id] = observe(
+                rate_samples.get(job_id), summary["bytes_transferred"], time.monotonic()
+            )
+
         if summary["files_done"] >= summary["files_total"]:
             logger.info(f"finished downloading {label}", extra={"frontend": True, "src": "slskd"})
+            await _settle_peer_speed(job, store, rate_samples)
             await store.update_status(job_id, "complete")
             await _organize_if_enabled(job, store)
             continue
@@ -84,12 +115,48 @@ async def poll_downloads_once(slskd_client, store, missing_counts: dict[int, int
                 f"download of {label} failed: {detail}",
                 extra={"frontend": True, "src": "slskd"},
             )
+            #? A partial arrival still measured a real rate, and a peer that half-sends is
+            #? exactly one you want a number for next time. A refusal that moved no bytes
+            #? measures nothing and records nothing - see measured_rate().
+            await _settle_peer_speed(job, store, rate_samples)
             await store.update_status(job_id, "failed", detail)
             continue
 
         if job["status"] == "queued" and summary["progress"] > 0:
             logger.info(f"downloading {label}", extra={"frontend": True, "src": "slskd"})
             await store.update_status(job_id, "downloading")
+
+
+async def _settle_peer_speed(
+    job: dict, store, rate_samples: dict[int, RateAccumulator] | None
+) -> None:
+    """
+    Write out what this peer actually gave us, and forget the working state.
+
+    Called on every terminal transition rather than only on success, because a transfer that
+    half-arrived measured a perfectly real rate while it was moving.
+
+    Never raises and never blocks the transition. The download has already happened; failing
+    to note the speed down is not a reason to report anything about the job differently.
+    """
+    if rate_samples is None:
+        return
+
+    state = rate_samples.pop(job["id"], None)
+    rate = measured_rate(state)
+
+    #? None means it never moved long enough to say anything - a refusal, or a transfer that
+    #? died in its first tick. Recording a 0 there would put "this peer gives you nothing" on
+    #? a candidate row as though it had been measured.
+    if rate is None:
+        return
+
+    try:
+        await store.record_peer_speed(job["username"], rate)
+        logger.debug(f"measured {rate / 1024:.0f} KB/s from {job['username']}")
+
+    except Exception as e:
+        logger.debug(f"could not record the speed measured from {job['username']}: {e}")
 
 
 async def _organize_if_enabled(job: dict, store) -> None:
@@ -188,11 +255,12 @@ async def _enrol_for_review(job: dict, results: dict, store) -> None:
 async def run_download_poller(slskd_client, store) -> None:
     logger.info("download poller started")
     missing_counts: dict[int, int] = {}
+    rate_samples: dict[int, RateAccumulator] = {}
 
     while True:
         try:
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            await poll_downloads_once(slskd_client, store, missing_counts)
+            await poll_downloads_once(slskd_client, store, missing_counts, rate_samples)
 
         except asyncio.CancelledError:
             logger.info("download poller stopped")

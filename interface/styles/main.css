@@ -2561,6 +2561,20 @@ span.red { color: var(--red-text); }
     cursor: help;
 }
 
+/*
+  What we measured ourselves, which is the trustworthy number on this row.
+
+  Green because that is what this interface already uses for "confirmed" - a free slot, a
+  passing signal - and because it has to read as a different KIND of thing from the
+  advertised figure beside it rather than as a second opinion of equal standing. It leads
+  the row for the same reason.
+*/
+.candidate-measured {
+    color: var(--green-text);
+    font-weight: var(--font-medium);
+    cursor: help;
+}
+
 .candidate-slot.free {
     color: var(--green-text);
 }
@@ -4910,6 +4924,25 @@ span.red { color: var(--red-text); }
  * ==========================================================================*/
 
 @media (max-width: 768px) {
+
+    /* ---- the peer row drops the advertised speed once we have a real one ----
+     *
+     * Same principle as the connection pills below: on a phone, only render what earns its
+     * space. Four chips wrap to three lines at 375px, and the advertised average is the one
+     * chip that is strictly superseded - `you got 780 KB/s` is a measurement of this peer
+     * and `peer avg 5.0 MB/s` is the peer's own claim about everyone. Keeping both costs a
+     * line to show the worse number next to the better one.
+     *
+     * It is still shown when there is NO measurement, which is most peers - that is the only
+     * speed information available for them, and something beats nothing.
+     *
+     * Desktop keeps both deliberately: the comparison is interesting there, and it is how
+     * you learn how far the advertised figure overstates.
+     */
+
+    .candidate-measured ~ .candidate-speed {
+        display: none;
+    }
 
     /* ---- top bar: ONE row, not four ----
      *

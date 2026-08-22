@@ -1065,6 +1065,50 @@ function peerSpeedLabel(bytesPerSecond) {
     return bytesPerSecond ? `peer avg ${formatSpeed(bytesPerSecond)}` : 'peer avg unknown';
 }
 
+/*
+ * What this peer ACTUALLY gave us last time, where we have measured it.
+ *
+ * This is the number the advertised one only pretends to be, so it leads the row and the
+ * advertised figure follows it. It is absent for most peers - you have to have downloaded
+ * from someone before there is anything to say - and absence renders as nothing at all
+ * rather than as a placeholder, because a row that shouts about what it does not know is
+ * worse than a row that simply says less.
+ *
+ * See src/peer_speed.py for what "measured" means here: the rate while bytes were moving,
+ * with queue time excluded.
+ */
+function measuredSpeedMarkup(candidate) {
+    if (!candidate.measured_speed) return '';
+
+    const samples = candidate.measured_samples || 1;
+    const when = formatMeasuredDate(candidate.measured_at);
+
+    //? One transfer is an anecdote and more than one is closer to a figure, so the tilde
+    //? appears only once there is an average to hedge. Saying "~" over a single sample would
+    //? imply a spread that was never measured.
+    const value = `${samples > 1 ? '~' : ''}${formatSpeed(candidate.measured_speed)}`;
+
+    const hint = samples > 1
+        ? `Measured by jimbrainz over ${samples} transfers from this peer${when}. `
+        : `Measured by jimbrainz on one transfer from this peer${when}. `;
+
+    const title = hint
+        + 'This is what actually arrived while bytes were moving, with queue time excluded - '
+        + 'unlike the advertised average beside it, which is the peer\'s own figure for all '
+        + 'their uploads to everyone.';
+
+    return `<span class="candidate-measured" title="${title}">you got ${value}</span>`;
+}
+
+function formatMeasuredDate(iso) {
+    if (!iso) return '';
+
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) return '';
+
+    return `, most recently ${at.toLocaleDateString()}`;
+}
+
 function formatSize(bytes) {
     if (!bytes) return '';
     const mb = bytes / (1024 * 1024);
@@ -1276,6 +1320,7 @@ function renderCandidates() {
                         ${sizeText ? `<span class="text default-muted">·</span><span class="text default-secondary">${sizeText}</span>` : ''}
                     </div>
                     <div class="candidate-peer">
+                        ${measuredSpeedMarkup(candidate)}
                         <span class="candidate-speed" title="${PEER_SPEED_HINT}">${peerSpeedLabel(candidate.upload_speed)}</span>
                         <span class="candidate-slot ${candidate.has_free_slot ? 'free' : 'busy'}">${candidate.has_free_slot ? 'free slot' : 'no free slot'}</span>
                         <span class="text default-muted">queue ${candidate.queue_length}</span>

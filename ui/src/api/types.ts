@@ -142,6 +142,19 @@ export interface Candidate {
    * and src/matching.py's peer thresholds only make sense as bytes. Do not divide by eight.
    */
   upload_speed: number
+  /**
+   * What jimbrainz actually measured from this peer, in BYTES/sec, or absent.
+   *
+   * The number `upload_speed` only pretends to be: the rate while bytes were genuinely
+   * moving on transfers we ran ourselves, with queue time excluded (src/peer_speed.py).
+   * Absent for any peer never downloaded from, which is most of them — absence is the
+   * ordinary case and must render as nothing rather than as a zero.
+   */
+  measured_speed?: number
+  /** How many transfers that average stands on. One is an anecdote; the UI says which. */
+  measured_samples?: number
+  /** ISO timestamp of the most recent measurement. */
+  measured_at?: string
   queue_length: number
   has_free_slot: boolean
   total_size: number

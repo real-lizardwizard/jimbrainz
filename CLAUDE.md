@@ -66,7 +66,7 @@ interface/         vanilla JS/CSS. Still the served page; main.js is shrinking a
                    separately - hard-refresh when verifying a palette change.
   dist/            BUILT from ui/, gitignored. Not present in a fresh checkout.
 ui/                Preact + Vite + TypeScript. New work goes here — see below.
-tests/             342 tests, all Python, all fixture-driven
+tests/             370 tests, all Python, all fixture-driven
 ```
 
 API routes are prefixed **`/jimbrainz/`** (renamed from `/lidbrainz/`).
@@ -411,6 +411,54 @@ on one — the whole thing was the desktop layout with `flex-wrap` turned on.
   was `▼ 1.2 MB/s`; the longer label overflows a 159px row at 375px, and the panel is inside a
   fixed-width window with nowhere to overflow to. Measured after: `scrollWidth === clientWidth`
   on every row, document scroll width 375, two lines per row.
+
+### Measuring what a peer actually gave you
+
+Added in v0.6.4. `src/peer_speed.py` is pure and holds all of it; the poller feeds it and the
+store keeps one row per peer.
+
+- **There is NO way to know a transfer's speed before it starts.** Nothing in the Soulseek
+  protocol probes throughput without moving bytes, so the only honest number is one you
+  measured. That is what this is, and it is why the answer to "can you predict it" is no and
+  will stay no.
+- **Measured in the POLLER, not in the browser.** `ui/src/lib/speed.ts` already derives a live
+  rate and reusing it was the obvious first idea. It is wrong: downloads run server-side and
+  most finish with nobody watching, so a browser-side measurement records nothing for exactly
+  the transfers you did not sit through.
+- **It cannot be backfilled, and that is not laziness.** Deriving a rate from existing job rows
+  means `created_at` -> `updated_at`, which spans the queue wait — a job queued 20 minutes and
+  transferring in 2 computes a tenth of its real rate. Believable, consistently wrong,
+  invisible by inspection. The existing data genuinely cannot produce this.
+- **THE MEASUREMENT RULE, and two wrong versions of it that the tests caught.** What is
+  measured is the span between consecutive MOVEMENTS of the byte counter, counted only when
+  those movements are close enough together to have been one continuous transfer.
+  1. *Bytes over wall-clock* is wrong for the queue reason above.
+  2. *"Count an interval only if the previous interval also moved"* is wrong and **worse**,
+     because it fails on the ordinary case rather than the rare one. We poll faster than slskd
+     refreshes its counter, so movement and stillness ALTERNATE during a perfectly healthy
+     transfer — the same fact `speed.ts` exists to handle — and that rule discarded every
+     interval, measuring nothing at all. It passed the queue test and failed reality.
+  So a still counter is judged by HOW LONG it stays still. Short (`MAX_COUNTER_LAG_SECONDS`,
+  12s) is refresh lag and the span counts; longer is a queue or a stall and the measurement
+  re-anchors past it.
+- **`measured_rate()` returns None, never 0.0, and callers must not coerce it.** "We never got
+  a good look at this peer" and "this peer gives you nothing" are opposite claims, and the
+  second would render on a candidate row as measured fact.
+- **Recorded on FAILURE as well as success.** A peer that half-sends gave you a real rate while
+  it was sending and is exactly one you want a number for. A refusal that moved no bytes
+  measures nothing and writes nothing — that is `measured_rate()` returning None, not a
+  special case.
+- **The average is capped at `SAMPLE_WEIGHT_CAP` (10) effective samples**, becoming an EMA past
+  that. A plain running mean would hold a peer's first hundred transfers against them forever,
+  through a house move and a new ISP.
+- **On the row, the measured figure LEADS and the advertised one follows**, in green, because
+  it is a different kind of thing rather than a second opinion of equal standing. **On mobile
+  the advertised one is hidden when a measurement exists** — same principle as the connection
+  pills, only render what earns its space, and it is strictly superseded there. It still shows
+  when there is no measurement, which is most peers.
+- **Absence is the ordinary case and renders as nothing.** Most peers have never been
+  downloaded from. `_attach_measured_speeds()` therefore fails silently: a degraded read looks
+  exactly like a peer nobody has met, which is the correct thing for it to look like.
 
 ### The downloads panel's optimistic overlays
 
@@ -1068,7 +1116,7 @@ compile time.
 
 ```bash
 .venv/bin/python -m src.main          # needs .env; DB_PATH=.devdata/jimbrainz.db
-.venv/bin/python -m pytest tests/ -q  # 342 tests
+.venv/bin/python -m pytest tests/ -q  # 370 tests
 ```
 
 Frontend, from `ui/`. **Needs Node `^20.19.0 || >=22.12.0`** — see the npm gotcha above:
@@ -1095,7 +1143,7 @@ HMR — **not** the real page. The real page is still `interface/index.html` ser
 
 ## What the tests cannot tell you
 
-All 342 tests are fixture-driven. **Nothing has ever talked to a real slskd.** The parts most
+All 370 tests are fixture-driven. **Nothing has ever talked to a real slskd.** The parts most
 likely to break on deployment are exactly the parts tests can't reach:
 
 - slskd transfer `state` strings. **This one already came true**: `"Completed, Rejected"` was
