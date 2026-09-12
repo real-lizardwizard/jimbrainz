@@ -682,13 +682,13 @@ stay; the CRT overlay, the text-glow and the ░▒▓ chrome go.
   the UI uses the platform's own stacks; the `.otf` files are still on disk and in git. This
   app is self-hosted and often runs with no internet at all, so a webfont CDN was never an
   option — local stacks are the only honest choice, and they cost nothing to load.
-  **But know what those files ARE before reviving them:** their name table reads "TX-02" and
-  "Berkeley Mono ... Copyright 2022-2024, U.S. Graphics LLC. All Rights Reserved", and the
-  `SCT.nfo` beside them is a scene release note. That is a commercial font, not licensed for
-  redistribution, sitting in a public repo. Found in v0.6.6 while listing font options; flagged
-  to James and deliberately NOT deleted, because removing it (and whether to scrub history) is
-  the owner's call. If a bundled face is wanted, use an openly licensed one (see the options
-  page for IBM Plex / JetBrains Mono / Noto Sans), or buy Berkeley Mono.
+  **Superseded in v0.6.7: the files are DELETED, on James's instruction.** Their name table read
+  "TX-02" and "Berkeley Mono ... Copyright 2022-2024, U.S. Graphics LLC. All Rights Reserved",
+  and the `SCT.nfo` beside them was a scene release note - a commercial font with no licence to
+  redistribute, sitting in a public repo. **They are still in git history** before v0.6.7;
+  scrubbing that means rewriting and force-pushing the branch, which has NOT been done and
+  should not be done without asking. Don't bring any of it back. The interface face is now a
+  bundled, openly licensed Noto Sans - see the entry on it below.
 - **The wordmark is figlet-style ASCII art and therefore needs `--font-mono`.** It used to
   inherit a *proportional* face, which is why the letterforms never quite lined up.
 - **The foundation layer at the top of `main.css` is written with `:where()`, so it carries
@@ -713,6 +713,19 @@ stay; the CRT overlay, the text-glow and the ░▒▓ chrome go.
   WINDOWS 7", just above the responsive blocks) - so it can be dialled back from the tokens,
   the same arrangement as the glow tokens. A full light-and-blue Aero palette would be a
   different theme, not a touch; don't drift there without being asked.
+- **The interface face is Noto Sans, bundled (v0.6.7).** Picked by James from six candidates
+  set side by side (system UI, Segoe UI, Tahoma, Verdana, IBM Plex, JetBrains Mono). It is
+  SELF-HOSTED woff2 in `interface/styles/font/noto-sans/`, served by the app itself, which is
+  what squares it with the no-CDN rule: it works with no internet, like everything else here.
+  One variable-weight file (300-700) per script, split by `unicode-range` exactly as Google
+  Fonts splits it, so a browser fetches only the Latin file (~the only one most pages need)
+  unless a name on screen is Cyrillic, Greek or Vietnamese. Devanagari was deliberately left
+  out. Noto Sans is used on EVERY device - not "Segoe UI first", which was the option's label -
+  because what James saw and liked was Noto (his Mac has no Segoe), and Segoe-first would make
+  Windows look different from the choice. The mono data face is unchanged. `OFL.txt` ships
+  beside the files, as the licence requires. The "0 font bytes on load" figure in the
+  performance table below is therefore now one 35 KB Latin file, cached; all seven together
+  are 342 KB, of which Latin Extended (164 KB) is the one a European name will pull in.
 - **Checkboxes, not switches (v0.6.6), for every checkbox in the app.** The settings tab's
   sliding switches were the one phone idiom left; they are plain checkboxes now, drawn by one
   `input[type="checkbox"]` rule in the Windows 7 block (a sunken square, a gloss on hover, a
@@ -1180,7 +1193,9 @@ fixed:
 - **The 30 bundled OTF faces are no longer referenced.** Only 7 ever loaded and `main-font-semi`
   (10 faces) was referenced by nothing at all. The interface uses the platform's own UI and
   monospace stacks now, so the page fetches **no font files whatsoever** — verified in the
-  network log. The `.otf` files are still on disk and in git; only the `@font-face` rules went.
+  network log. (The `.otf` files lingered on disk until v0.6.7, when they were deleted as an
+  unlicensed commercial font; and since v0.6.7 the page does fetch one font file again - the
+  bundled 35 KB Noto Sans Latin subset.)
 - **The loading indicator no longer animates the `content` property.** Swapping `content`
   twelve times a second replaces a text node, and each swap is a layout plus a paint. It is a
   gradient sweep now, over a 2px-tall element.
