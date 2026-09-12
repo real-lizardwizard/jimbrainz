@@ -340,6 +340,11 @@ def plan_organization(job: dict, download_root: str, library_root: str) -> dict:
     }
 
 
+def _is_multi_disc(release: dict) -> bool:
+    """True when the release's tracklist spans more than one disc."""
+    return len({t.get("disc") for t in release.get("tracks") or [] if t.get("disc")}) > 1
+
+
 def tag_values(release: dict, track: dict | None) -> dict:
     """
     The tags a file should carry for this release and track.
@@ -374,7 +379,19 @@ def tag_values(release: dict, track: dict | None) -> dict:
 
     if track:
         values["title"] = track.get("title")
-        if track.get("position"):
+
+        #? A multi-disc release is numbered PER DISC, the way MusicBrainz and every player number
+        #? it: disc 2 opens with track 1 of disc 2, not track 11 of one running sequence.
+        #? `position` stays the running number regardless - the matcher keys on it and files are
+        #? named after it, which is what keeps a two-disc set in order inside one folder.
+        #?
+        #? A single-disc release writes no disc tag at all. Writing "1" everywhere would give
+        #? every album in the library a discnumber change, so re-opening the editor on an album
+        #? that is already right could never again say "nothing to change".
+        if _is_multi_disc(release) and track.get("disc") and track.get("disc_position"):
+            values["tracknumber"] = str(track["disc_position"])
+            values["discnumber"] = str(track["disc"])
+        elif track.get("position"):
             values["tracknumber"] = str(track["position"])
 
     #? empty values are dropped rather than written as blanks - clearing a tag the user

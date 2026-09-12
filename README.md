@@ -155,14 +155,20 @@ The year is the <em>album's</em> year, not the pressing's, so a 2011 remaster of
 
 ### A library tab that knows what you've got
 <details>
-<summary style="font-style:italic">Including when you're holding three versions of the same record</summary>
-Reads your library off disk with mutagen and lists one row per album, with its editions listed underneath — the same shape as release group → releases in the search tab. Albums you hold more than one version of are marked and filterable, which was the entire point.
+<summary style="font-style:italic">Laid out like a file explorer, including when you're holding three versions of the same record</summary>
+Reads your library off disk with mutagen and shows it as a tree, the way Windows Explorer shows folders: artists at the top, their albums indented underneath when you open one, then the songs. Whatever you pick shows up in a pane on the right with its cover, its properties, what's wrong with it, and every track. The arrow keys walk the tree like Explorer's do, and you can drag the divider between the two panes.
 <br><br>
-Those editions are <em>always on screen</em>, not hidden behind a disclosure triangle: holding three pressings of a record is the thing this view exists to tell you, so it would be an odd thing to make you click for. Each edition has its own toggle for its tracklist, which is the part worth deferring — track lists are large and most are never opened.
+Albums you hold more than one version of say so on their own row ("3 editions"), which was the entire point, and open to one row per edition. Identity comes from tags rather than folder names, so renaming a folder by hand doesn't split an album in two. Folders with no MusicBrainz id at all — i.e. anything that predates jimbrainz — are left as their own albums rather than being guessed at and merged.
 <br><br>
-Identity comes from tags rather than folder names, so renaming a folder by hand doesn't split an album in two. Folders with no MusicBrainz id at all — i.e. anything that predates jimbrainz — are left as their own albums rather than being guessed at and merged.
+The search box matches song titles as well as artists and albums: type a song and the tree opens its album to show you where it is.
 <br><br>
-Cover art comes from a file beside the tracks, then from art embedded in the audio, then from the Cover Art Archive. Clicking an artist or album name takes you to a search for it.
+The track list shows <em>whichever fields you want</em>. A Fields menu (or right-clicking the column headers) switches columns on and off: track and disc number, artist, genre, composer, label, catalogue number, ISRC, bitrate, sample rate, bit depth, channels, the MusicBrainz ids, and more. Pick a single track and those same fields list down the pane, with every other tag the file carries underneath. Track details are read from the files when you look at them, so they show what's on disk now even if something other than jimbrainz changed the tags.
+<br><br>
+Multi-disc sets run disc by disc under "Disc 1", "Disc 2" headings, rather than dealing the two discs out alternately because both start at track 1.
+<br><br>
+Opening the tab is instant after the first time. The last scan is saved in jimbrainz's database, so the library draws straight away from that, says how old it is, and checks the disk for changes underneath while you browse. That includes after a restart, which used to mean re-reading every tag in the library. Retags and deletes made in jimbrainz update the saved copy as they happen. If you change files with another program, use Rescan.
+<br><br>
+Cover art comes from a file beside the tracks, then from art embedded in the audio, then from the Cover Art Archive. Click a cover to see it full size.
 <br><br>
 
 ![The library tab, with an album's three editions listed under it](assets/images/library.png)
@@ -176,13 +182,15 @@ Picard-shaped, but small. Open the editor on any album and it searches MusicBrai
 <br><br>
 Pick a release and it fills in the fields, or type them yourself — artist, album, year, original year, and the edition name that names the folder. So if MusicBrainz says "remixed by john" and you'd rather the folder just said <code>[REMIX]</code>, type that.
 <br><br>
-Nothing is written until you press apply, and the preview showing what would change is produced by the same code that does the writing — so it can't drift into lying about it. It can also pull the release's cover into the folder, with the incoming art shown next to the one you already have.
+Nothing is written until you press apply, and the preview showing what would change is produced by the same code that does the writing — so it can't drift into lying about it. It can also pull the release's cover into the folder, with the incoming art shown next to the one you already have. Click either cover to compare the two <em>at full size</em>, side by side, with their real pixel dimensions and the larger one marked. Two sleeves that look identical as thumbnails usually differ in exactly that, and you can keep the new one from right there.
+<br><br>
+Multi-disc releases are tagged per disc, the way MusicBrainz and every player number them: disc 2 starts at track 1 of disc 2 rather than carrying on from disc 1. Single-disc albums aren't given a disc number at all, so an album that's already right still reads "nothing to change".
 </details>
 
 ### Deleting albums
 <details>
 <summary style="font-style:italic">With a confirmation that actually tells you what's about to go</summary>
-Each album (and each edition of it) has a delete control. The confirmation names the folder, the track count, the size, and any files in there that are neither audio nor artwork — a rip log or a cue sheet might be the only copy, so those get listed individually.
+Delete is in the command bar above any album (or any one edition of it). The confirmation names the folder, the track count, the size, and any files in there that are neither audio nor artwork — a rip log or a cue sheet might be the only copy, so those get listed individually.
 <br><br>
 It's permanent, there's no undo, and it says so. It refuses anything that isn't an album inside your library, including artist folders, so it can't take a whole discography by accident.
 </details>

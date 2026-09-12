@@ -1,7 +1,7 @@
 import { get, post } from './http'
 import type {
   DeleteResult, DeletionSummary, LibraryResponse, NewImportsResponse, RetagPlan, RetagRelease,
-  RetagResponse,
+  RetagResponse, TrackDetailsResponse,
 } from './types'
 
 /**
@@ -10,9 +10,23 @@ import type {
  * The server caches per folder on mtime, so this is cheap to call again — but the first scan
  * of a large library reads tags off every file and can take seconds. Treat it as a load, not
  * a poll.
+ *
+ * `snapshot` answers from the saved scan without touching the disk, marked `stale`, and falls
+ * through to a real scan when nothing has been saved yet. It is what makes the tab open at once.
  */
-export function listAlbums(): Promise<LibraryResponse> {
-  return get<LibraryResponse>('/library/albums')
+export function listAlbums(options: { snapshot?: boolean } = {}): Promise<LibraryResponse> {
+  return get<LibraryResponse>(options.snapshot ? '/library/albums?snapshot=true' : '/library/albums')
+}
+
+/**
+ * Every tag on every file in one album, read from disk now. For the track viewer.
+ *
+ * Deliberately not part of the scan: the scan is the whole library in one payload, and thirty
+ * tags a track across thousands of tracks would tax every visit for detail shown one album at
+ * a time.
+ */
+export function trackDetails(albumPath: string): Promise<TrackDetailsResponse> {
+  return get<TrackDetailsResponse>(`/library/tracks?album=${encodeURIComponent(albumPath)}`)
 }
 
 /** Drop the server's per-folder cache and read everything again. */

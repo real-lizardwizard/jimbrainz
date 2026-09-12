@@ -5,8 +5,9 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from src.config import Config
-from src.library import (delete_album, forget_cached_album, load_album_art,
-                         scan_library, summarize_for_deletion)
+from src.library import (SCAN_FORMAT, delete_album, drain_cache_changes, forget_cached_album,
+                         load_album_art, read_album_details, scan_library, seed_cache,
+                         snapshot_library, summarize_for_deletion)
 from src.logger import logger
 from src.metadata_health import ISSUE_TYPES, attach_issues
 from src.organizer import is_within
@@ -33,7 +34,66 @@ def _store(request: Request):
     return getattr(request.app.state, "store", None)
 
 
-async def _scan_with_queue(request: Request, force: bool) -> dict:
+#? Which LIBRARY_PATH's saved scan has been loaded into memory. Once per root per process:
+#? after that the in-memory cache is the fresher of the two, and re-seeding would be waste.
+_cache_loaded_for: str | None = None
+_cache_load_lock = asyncio.Lock()
+
+
+async def _ensure_cache_loaded(request: Request) -> None:
+    """
+    Load the saved scan into memory, the first time the library is asked for.
+
+    Lazily rather than at startup, for the same reason the library isn't scanned until its tab
+    is opened: people who never look at it shouldn't pay for it. It is one indexed read, and
+    it is the difference between the first visit after a restart re-reading every tag in the
+    library and merely statting every folder.
+    """
+    global _cache_loaded_for
+    root = Config.LIBRARY_PATH or ""
+
+    if not root or _cache_loaded_for == root:
+        return
+
+    async with _cache_load_lock:
+        if _cache_loaded_for == root:
+            return
+
+        store = _store(request)
+        if store is not None:
+            taken = seed_cache(await store.load_library_cache(root, SCAN_FORMAT))
+            if taken:
+                logger.info(f"library: loaded {taken} album(s) from the saved scan")
+
+        _cache_loaded_for = root
+
+
+async def _persist_cache(request: Request, scan: dict | None = None) -> None:
+    """
+    Save what the scan cache learned, so a restart picks up from it instead of from nothing.
+
+    Called after every real scan AND after every forget. The forget matters as much as the
+    scan: an in-place retag doesn't move the folder's mtime, so a saved row left behind would
+    load the pre-edit tags straight back in on the next restart and they would match.
+    """
+    upserts, removals = drain_cache_changes()
+    store = _store(request)
+
+    if store is None:
+        return
+
+    root = Config.LIBRARY_PATH or ""
+
+    if upserts or removals:
+        await store.save_library_cache(root, upserts, removals, SCAN_FORMAT)
+
+    if scan is not None and not scan.get("problem"):
+        await store.record_library_scan(
+            root, scan["scanned_at"], scan["scan_seconds"], scan["album_count"]
+        )
+
+
+async def _scan_with_queue(request: Request, force: bool, snapshot: bool = False) -> dict:
     """
     Scan the library, then say what still needs attention and why.
 
@@ -45,10 +105,26 @@ async def _scan_with_queue(request: Request, force: bool) -> dict:
     Albums are also enrolled for review as a side effect, which is what gives `first_seen` a
     meaning. It is `INSERT OR IGNORE`, so a scan can never overwrite the fact that an album
     arrived as a download rather than being found sitting there.
-    """
-    result = await asyncio.to_thread(scan_library, Config.LIBRARY_PATH or "", force)
 
+    `snapshot` answers from the cache without touching the disk, when there is a cache to
+    answer from - see library.snapshot_library. It falls through to a real scan when there
+    isn't, so asking for one never returns an empty library that is merely unscanned.
+    """
+    root = Config.LIBRARY_PATH or ""
     store = _store(request)
+
+    await _ensure_cache_loaded(request)
+
+    result = await asyncio.to_thread(snapshot_library, root) if snapshot else None
+
+    if result is not None:
+        #? when the disk was last actually looked at, so the interface can say how old this is
+        info = await store.library_scan_info(root) if store else None
+        result["scanned_at"] = info["scanned_at"] if info else None
+    else:
+        result = await asyncio.to_thread(scan_library, root, force)
+        await _persist_cache(request, result)
+
     reviews = await store.album_reviews() if store else {}
 
     result["queue"] = attach_issues(result["albums"], reviews)
@@ -57,7 +133,10 @@ async def _scan_with_queue(request: Request, force: bool) -> dict:
     #? forgetting them, exactly as the downloads panel does for job tracking
     result["review_tracking_enabled"] = bool(store and store.available)
 
-    if store:
+    #? Neither of these runs on a snapshot. Enrolling from one would be harmless, but pruning
+    #? from one would not: an album filed since the snapshot was taken is absent from it, and
+    #? its brand-new import row would be deleted as an orphan before anyone had seen it.
+    if store and not result["stale"]:
         await store.record_albums_seen(result["albums"])
 
         #? Only after a scan that found something. An orphaned row - one whose folder was
@@ -73,7 +152,7 @@ async def _scan_with_queue(request: Request, force: bool) -> dict:
 
 
 @router.get("/albums")
-async def albums(request: Request):
+async def albums(request: Request, snapshot: bool = False):
     """
     Everything currently in LIBRARY_PATH, and what's wrong with it.
 
@@ -84,11 +163,18 @@ async def albums(request: Request):
     A missing or unset LIBRARY_PATH is reported in `problem` rather than raised: the library
     view is perfectly capable of rendering "you haven't configured this yet", and a 500 here
     would look like a broken app instead of an unfinished setup.
+
+    `?snapshot=true` answers from the saved scan without touching the disk, marked `stale`.
+    The interface draws that at once and then asks again without it - see useLibrary.
     """
     try:
-        result = await _scan_with_queue(request, False)
+        result = await _scan_with_queue(request, False, snapshot)
 
-        if result["problem"]:
+        if result["stale"]:
+            #? debug, not the event log: every visit to the tab now makes two requests, and
+            #? the real scan right behind this one reports the figure worth reading
+            logger.debug(f"library: {result['album_count']} album(s) from the saved scan")
+        elif result["problem"]:
             logger.warning(f"library scan: {result['problem']}", extra={"frontend": True})
         else:
             queue = result["queue"]
@@ -170,6 +256,34 @@ async def art(album: str):
         #? letting an edit appear on its own.
         headers={"Cache-Control": "private, max-age=300"},
     )
+
+
+@router.get("/tracks")
+async def tracks(album: str):
+    """
+    Every tag on every file in one album, read from the files right now. For the track viewer.
+
+    Read live rather than served from the scan, because the viewer's job is to show what is on
+    disk: the scan is cached on the folder's mtime, and a retag by any other tool doesn't move
+    that. It is also far more than the scan carries - thirty-odd named tags, the audio
+    properties and every raw tag - which the library-wide payload has no business holding.
+
+    Takes a path relative to LIBRARY_PATH, so it copies /art's guard exactly: containment is
+    checked before anything is read, and every refusal is the same 404 as a missing album.
+    """
+    root_path = Config.LIBRARY_PATH or ""
+
+    if not root_path or not album:
+        raise HTTPException(status_code=404, detail="no such album")
+
+    root = Path(root_path)
+    directory = root / album
+
+    if not is_within(directory, root) or not directory.is_dir():
+        logger.warning(f"refused library tracks request outside the library: {album!r}")
+        raise HTTPException(status_code=404, detail="no such album")
+
+    return {"album": album, "files": await asyncio.to_thread(read_album_details, directory)}
 
 
 class RetagRelease(BaseModel):
@@ -264,6 +378,7 @@ async def retag_apply(request: Request, body: RetagRequest):
         forget_cached_album(plan["source"])
         if results.get("moved_to"):
             forget_cached_album(results["moved_to"])
+        await _persist_cache(request)
 
         #? Applying a release IS reviewing the album, so this clears it from the new-import
         #? prompt without a second click. It follows the rename because album_review is keyed
@@ -348,6 +463,7 @@ async def fetch_cover_art(request: Request, body: CoverArtRequest):
         #? without this the scan would keep serving the old art_mtime and the interface would
         #? go on showing the previous cover - see read_album_dir
         forget_cached_album(str(Path(Config.LIBRARY_PATH) / body.album_path))
+        await _persist_cache(request)
 
         return {"written": results["written"], "replaced": plan["existing"]}
 
@@ -449,7 +565,7 @@ class DeleteRequest(BaseModel):
 
 
 @router.post("/delete")
-async def delete(request: DeleteRequest):
+async def delete(request: Request, body: DeleteRequest):
     """
     Remove an album folder and everything in it. Permanent.
 
@@ -465,10 +581,14 @@ async def delete(request: DeleteRequest):
         raise HTTPException(status_code=400, detail="LIBRARY_PATH is not set")
 
     try:
-        result = await asyncio.to_thread(delete_album, Config.LIBRARY_PATH, request.album_path)
+        result = await asyncio.to_thread(delete_album, Config.LIBRARY_PATH, body.album_path)
 
         if not result["deleted"]:
             raise HTTPException(status_code=400, detail=result["problem"])
+
+        #? delete_album forgot the folder; this makes the saved scan forget it too, or a restart
+        #? would draw a deleted album until the next scan noticed it was gone
+        await _persist_cache(request)
 
         return result
 

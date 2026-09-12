@@ -22,6 +22,37 @@ export function formatSize(bytes: number | null | undefined): string {
   return `${(mb / 1024).toFixed(1)} GB`
 }
 
+/** An album's running time, coarse: "42 min", "1h 12m". '' for zero. */
+export function formatDuration(seconds: number): string {
+  if (!seconds) return ''
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** A track's running time, "4:05". '' for zero. */
+export function trackTime(seconds: number | null | undefined): string {
+  if (!seconds) return ''
+  const whole = Math.round(seconds)
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
+}
+
+/**
+ * How long ago a unix timestamp (seconds) was, roughly. '' when unknown.
+ *
+ * Deliberately coarse. It labels a saved scan so you can judge whether to trust it, and "3 h
+ * ago" answers that where a timestamp would make you do arithmetic.
+ */
+export function formatAge(unixSeconds: number | null | undefined, now = Date.now()): string {
+  if (!unixSeconds) return ''
+  const seconds = Math.max(0, Math.round(now / 1000 - unixSeconds))
+  if (seconds < 60) return 'just now'
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`
+  const days = Math.floor(seconds / 86400)
+  return `${days} day${days === 1 ? '' : 's'} ago`
+}
+
 /**
  * The URL for an album's cover as it exists on disk.
  *

@@ -52,7 +52,7 @@ def read_current_tags(path: Path) -> dict:
 
     current = {}
     for key in ("album", "albumartist", "artist", "date", "originaldate", "title", "tracknumber",
-                "musicbrainz_albumid", "musicbrainz_releasegroupid",
+                "discnumber", "musicbrainz_albumid", "musicbrainz_releasegroupid",
                 "releasecountry", "media", "catalognumber"):
         try:
             values = audio.get(key) or []
@@ -241,6 +241,11 @@ def plan_retag(album_path: str, release: dict, library_root: str, want_art: bool
             "matched": track is not None,
             "track_title": (track or {}).get("title", ""),
             "track_position": (track or {}).get("position"),
+            #? carried so execute_retag can rebuild the same track the plan was computed from -
+            #? without them it would write the running number and no disc, and the write would
+            #? disagree with the preview it is carrying out
+            "track_disc": (track or {}).get("disc"),
+            "track_disc_position": (track or {}).get("disc_position"),
             "changes": differing,
         })
 
@@ -368,7 +373,12 @@ def execute_retag(
 
         try:
             track = (
-                {"title": entry["track_title"], "position": entry["track_position"]}
+                {
+                    "title": entry["track_title"],
+                    "position": entry["track_position"],
+                    "disc": entry.get("track_disc"),
+                    "disc_position": entry.get("track_disc_position"),
+                }
                 if entry["matched"] else None
             )
             write_tags(path, release, track)

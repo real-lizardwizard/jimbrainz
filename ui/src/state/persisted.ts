@@ -22,6 +22,14 @@ export const STORAGE_KEYS = {
    * would survive only until the next time main.js saved. New key, one writer.
    */
   preferences: 'jimbrainz-preferences',
+  /**
+   * Which fields the library's track viewer shows. Its own key, written only by the viewer's
+   * field menu - the same one-writer rule as `preferences` above, which the settings tab
+   * rewrites wholesale from its own copy.
+   */
+  libraryFields: 'jimbrainz-library-fields',
+  /** Where the library's splitter sits: the tree pane's width in px. */
+  libraryPaneWidth: 'jimbrainz-library-pane-width',
 } as const
 
 /*
@@ -143,6 +151,42 @@ export function readReleaseColumnState(): ReleaseColumnState | null {
 
 export function writeReleaseColumnState(state: ReleaseColumnState): void {
   writeRaw(STORAGE_KEYS.releaseColumns, JSON.stringify(state))
+}
+
+/* ===== jimbrainz-library-fields ===== */
+
+/**
+ * The viewer's field choices. `seen` is every field id that existed when this was written, so
+ * a field added by a LATER version can tell "you turned me off" (in seen, not in visible) from
+ * "you have never been asked about me" (not in seen) - and take its own default in the second
+ * case rather than silently staying hidden forever.
+ */
+export interface LibraryFieldState {
+  visible: string[]
+  seen: string[]
+}
+
+export function readLibraryFields(): LibraryFieldState | null {
+  const saved = readJson<Partial<LibraryFieldState>>(STORAGE_KEYS.libraryFields)
+  if (!saved || !Array.isArray(saved.visible) || !Array.isArray(saved.seen)) return null
+
+  const strings = (list: unknown[]) => list.filter((v): v is string => typeof v === 'string')
+  return { visible: strings(saved.visible), seen: strings(saved.seen) }
+}
+
+export function writeLibraryFields(state: LibraryFieldState): void {
+  writeRaw(STORAGE_KEYS.libraryFields, JSON.stringify(state))
+}
+
+/* ===== jimbrainz-library-pane-width ===== */
+
+export function readLibraryPaneWidth(): number | null {
+  const n = Number(readRaw(STORAGE_KEYS.libraryPaneWidth))
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+export function writeLibraryPaneWidth(width: number): void {
+  writeRaw(STORAGE_KEYS.libraryPaneWidth, String(Math.round(width)))
 }
 
 /* ===== jimbrainz-preferences ===== */

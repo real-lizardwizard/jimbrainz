@@ -47,8 +47,10 @@ src/
                    library can hold the deluxe and the standard press at the same time.
   metadata_health.py  PURE. What's WRONG with an album on disk, as issue codes. Backs the
                    metadata queue. Derived on every request, never stored — see below.
-  library.py       scans LIBRARY_PATH with mutagen, cached per folder on mtime. Also
-                   finds cover art (file beside the tracks, else embedded in the audio).
+  library.py       scans LIBRARY_PATH with mutagen, cached per folder on mtime - and that
+                   cache is SAVED to SQLite (library_cache), so a restart starts warm and
+                   the tab can draw a snapshot before touching the disk. Also finds cover
+                   art, and reads one album's files in full for the track viewer.
   store.py         SQLite job store + transfer reconciliation helpers.
   poller.py        background task: slskd transfers -> job status transitions.
   organizer.py     writes downloads into the library. Plan/execute split, dry_run default.
@@ -66,7 +68,7 @@ interface/         vanilla JS/CSS. Still the served page; main.js is shrinking a
                    separately - hard-refresh when verifying a palette change.
   dist/            BUILT from ui/, gitignored. Not present in a fresh checkout.
 ui/                Preact + Vite + TypeScript. New work goes here — see below.
-tests/             370 tests, all Python, all fixture-driven
+tests/             403 tests, all Python, all fixture-driven (+ ui/test/*.sim.cjs scripts)
 ```
 
 API routes are prefixed **`/jimbrainz/`** (renamed from `/lidbrainz/`).
@@ -486,30 +488,101 @@ store keeps one row per peer.
   that outlives its request stops being a prediction and becomes a lie — a row stuck on
   "cancelling…" while the file is still arriving is worse than never having said it.
 
-### The library view's editions
+### The library explorer (v0.6.5)
 
-- **An album's editions are ALWAYS visible; only their track lists are behind a toggle.**
-  They used to sit behind the album's own disclosure triangle, which hid the single fact
-  this view exists to show — that you are holding three pressings of this record — behind a
-  click, on a row that looked identical to every single-edition album until you opened it.
-  Holding multiple versions is the feature, so it is shown, not disclosed.
-  **This is not an oversight to "fix" by making them collapsible again.**
-- **The 711ms rule still holds, because an edition HEADER is not a track list.** What must
-  stay deferred is `<TrackList>`, and every one of them still is — one toggle per edition.
-  Verified: with a three-edition album on screen, `.library-tracks` in the document is **0**
-  until an edition is opened, and opening one blocks for 0.3ms. If you ever render editions
-  and their tracks together, this view will hit the search view's freeze harder, because a
-  library holds far more albums than one search returns.
-- **A single-edition album keeps its own toggle, and it opens the tracks directly.** The
-  album row IS the release row in that case, so nesting it under a lone "Standard" row would
-  be a click that buys nothing. The resulting rule is simple and worth preserving: **one
-  disclosure per release, and it is always for tracks.**
-- **The multi-edition album head renders a hidden spacer where the toggle would be**
-  (`.library-expand-spacer`). It has nothing to disclose, but its artwork and titles still
-  have to line up with the single-edition rows directly above and below it in the same list;
-  without the spacer every multi-edition album steps out of alignment with its neighbours.
-  `visibility: hidden` keeps the glyph's width — which is where the alignment comes from —
-  while taking it out of the accessibility tree and out of hit testing.
+James asked for it by description: artists at the top, albums indented under an artist when
+you click it, songs under an album, metadata in a pane on the right. It replaced the list of
+full-width album cards (`LibraryAlbumRow`, deleted), whose middle was mostly empty space.
+
+- **The tree is drawn FLAT** - one row per node, `--tree-level` for the indent, `aria-level`
+  for assistive tech - from the pure `lib/libraryTree.ts::visibleRows()`. Keyboard navigation
+  walks a flat order anyway. What is visible when is decided there and pinned by
+  `ui/test/tree.sim.cjs`, not in a component's render.
+- **The 711ms rule still holds, harder.** Nothing below an album exists until it is opened
+  (pinned in the sim), and the details pane renders ONE album's track table at a time.
+- **Click opens, the twisty toggles, arrows select without opening.** A click selects AND
+  opens but never closes - "if you click on an artist, then the albums are listed below".
+  The triangle toggles without selecting; the keyboard moves like Explorer's (right opens or
+  steps in, left closes or steps out to the parent). Only the selected row is in the tab order.
+- **The editions decision survives the tree.** An album you hold several pressings of says
+  "N editions" on its OWN row, so the fact this view exists to show still needs no click; it
+  opens to one row per edition, and each edition opens to its tracks. A single-edition album
+  opens straight to tracks - one level per release, as before.
+- **Filtering opens what it found.** Every artist with a match starts open (three matches under
+  three closed artists would make you open each one); what you close is remembered until the
+  filter changes. **The search matches song titles** from two characters, and an album opened
+  only by a song match shows just the matching songs - opening it by hand shows them all.
+- **The selection index covers the whole library, not the filtered tree**, so what you picked
+  stays in the pane while you narrow the tree instead of blanking the moment it stops matching.
+- **Tree and pane share one selection, with two ways to follow it.** A keyboard move takes
+  focus (`focusToken`); picking something in the pane opens the tree down to it and scrolls it
+  into view WITHOUT taking focus (`revealToken`). Mixing them up yanks the keyboard out of
+  whichever pane you were in.
+- **Track details are read live by `/library/tracks`, never carried in the scan.** The scan is
+  cached on folder mtime, which a retag by another tool doesn't move, and thirty-odd tags for
+  every track would bloat the library-wide payload. The scan's copy fills the basic columns at
+  once; tag-only columns show `·` until the files land, not a blank that reads as "no genre".
+  `useTrackDetails` caches per album and **drops the cache on every library reload** - an
+  in-place retag changes neither the path nor the mtime, so nothing else would notice.
+- **`/library/tracks` is the third endpoint that turns user input into a filesystem read**
+  (with `/art` and `/deletion_summary`), and copies `/art`'s guard exactly, identical 404
+  included. Tested with the same traversal cases.
+- **Field choices have their own storage key** (`jimbrainz-library-fields`) and one writer - the
+  details pane's single `useTrackFields` instance, which the menu and the table both read.
+  It stores `seen` beside `visible`, so a field added in a later version takes its own default
+  instead of staying hidden for everyone who ever touched the menu. Pinned in the sim.
+- **The splitter's width is persisted (`jimbrainz-library-pane-width`) and capped in CSS** at
+  `100% - 340px`, so a width saved in a big window can't swallow the details in a small one.
+- **What fits on a tree row depends on the TREE's width, not the window's.** `#library-nav` is
+  a size container, and `@container` rules drop the issue chip, then the year, as it narrows.
+  The album name is never what gets squeezed.
+- **On a phone the details pane is a full-screen sheet**, opened by picking an album or a
+  track (an artist just opens in place) and closed by the command bar's back button.
+
+### The saved scan (v0.6.5)
+
+- **Opening the tab makes two requests, on purpose.** `?snapshot=true` answers from the cache
+  without touching the disk - instant however slow the storage - and is drawn at once, marked
+  stale with its age; a real scan then runs underneath and replaces it. With nothing saved the
+  snapshot request falls through to a real scan, so an unscanned library never draws as empty.
+- **The in-memory cache is persisted to `library_cache`, keyed exactly as in memory** (absolute
+  folder path) plus root and `SCAN_FORMAT`, and still validated against folder mtime before it
+  is trusted. Losing the table costs one slow scan and nothing else - it is a cache, not a record.
+- **Bump `SCAN_FORMAT` in library.py whenever `read_album_dir()`'s output changes shape.** A
+  saved row outlives the process, so an old row for a folder nobody touched would be served
+  forever without the new field. Other formats are ignored on load and swept on save.
+- **Every forget reaches the disk as well** (`_persist_cache` after retag, art fetch and
+  delete). An in-place retag doesn't move the folder's mtime, so a saved row left behind would
+  load the pre-edit tags straight back in on the next restart - and they would match.
+- **A snapshot never enrols or prunes review rows.** An album filed since the snapshot was
+  taken is absent from it, and pruning would delete its new import row as an orphan before
+  anyone had seen it. Pinned by a test that shows a real scan DOES prune it.
+- **Scans hand out COPIES of the cached dicts.** Responses are decorated in place
+  (`_mark_multi_edition`, `attach_issues`), and decorating the cached dict itself is how an
+  album went on calling itself "Standard" after its only sibling was deleted - a latent bug
+  that persistence would have written to disk. Fixed and tested.
+- **Scans are serialised by `_scan_lock`; snapshots deliberately are not.** They exist to
+  answer while a slow scan runs, and `dict.copy()` is atomic under the GIL.
+- **Rescan is still the escape hatch, and now more often the only one.** A retag by another
+  program is invisible to an mtime cache; a restart used to be the accidental fix for that, and
+  no longer is. Rescan's tooltip says so.
+
+### Disc numbers (v0.6.5)
+
+- **Tracks carry both numberings.** `position` stays the RUNNING number across discs - the
+  matcher keys on it and files are named after it, which keeps a two-disc set in order inside
+  one folder - and `disc`/`disc_position` are MusicBrainz's own. `flattenTracks()` in release.ts
+  and `buildExpectedFromRelease()` in main.js both produce them; keep the two in step.
+- **A multi-disc release is tagged per disc; a single-disc release writes no disc tag at all.**
+  Writing "1" everywhere would give every album in the library a discnumber diff, so an album
+  that is already right could never again say "nothing to change". Decided once, in
+  `organizer.tag_values`, which the retag preview shares as always.
+- **The download request's `Track` model declares `disc` and `disc_position`.** pydantic drops
+  undeclared fields without a word, and downloads would have been tagged 1..20 with no discs -
+  quietly unlike the same album corrected in the editor. Tested.
+- **The scan reads `discnumber` and orders disc-first**, so a two-disc set stops interleaving
+  (1, 1, 2, 2...). `disc_count` counts distinct TAGGED discs - 0 when untagged, never a guessed
+  1 - and only `disc_count > 1` is split under "Disc N" headings.
 
 ### The settings tab
 
@@ -611,6 +684,15 @@ stay; the CRT overlay, the text-glow and the ░▒▓ chrome go.
 - **`prefers-reduced-motion` is handled once, in `theme.css`, by collapsing the duration
   tokens** rather than by redefining animations. One block therefore covers every transition
   in both halves — including ones written after it.
+- **v0.6.5 took a step back from "modern", on request: "a touch more of a Windows 7 feel".**
+  A TOUCH - the dark palette, the purple accent and the monospace data stay. What came back is
+  Aero's shapes: radii pulled in to 2/3/4/6px, glossy two-tone fills with a hard midline,
+  a 1px top highlight on anything raised, gradient toolbars/captions/status bar, and
+  Explorer's selection (translucent gradient in a thin border; grey when the list isn't
+  focused). All of it is section 9 of theme.css plus ONE block in main.css ("A TOUCH OF
+  WINDOWS 7", just above the responsive blocks) - so it can be dialled back from the tokens,
+  the same arrangement as the glow tokens. A full light-and-blue Aero palette would be a
+  different theme, not a touch; don't drift there without being asked.
 - **Accent is spent, not sprinkled.** Solid purple fills appear on exactly two controls:
   Search, and the metadata editor's Apply. Apply writes tags to disk and renames a folder
   with no undo, so it must not look like the Cancel button beside it. Everything purple used
@@ -661,9 +743,10 @@ Each of these cost real time. Don't rediscover them.
   so adding a third button meant adding another override — and two live auto margins split the
   free space instead of pooling it, putting a gap in the middle of the group. `#library-summary`
   takes the slack with `margin-right: auto` and any number of controls after it stay together.
-- **The filter columns collapse on mobile and the class is inert on desktop.** Both the
-  vanilla and Preact columns always carry `collapsed`; only the `max-width: 768px` block acts
-  on it. Don't "tidy" that by removing the class on desktop — it's what keeps one code path.
+- **The filter column and the library's views collapse on mobile, and the class is inert on
+  desktop.** The vanilla `#filter-column` and the library's `#library-views` both carry
+  `collapsed`; only the `max-width: 768px` block acts on it. Don't "tidy" that by removing the
+  class on desktop — it's what keeps one code path.
 - ~~The loading indicator animates `content`~~ **Replaced in v0.5.** It swapped ░▒▓█ on
   `steps(1)`, justified as using "the same glyphs the filter headings use". Those headings
   are plain words now, so that justification expired with them — and animating `content`
@@ -711,12 +794,23 @@ Each of these cost real time. Don't rediscover them.
   the queue moves to a different album, since nothing about the previous one applies. A `key`
   that changes only on navigation is what buys both; keying on `album.path` or `album.key`
   would break the first, because an apply changes them.
-- **New chips in the album rows do not shrink, and the row is a nowrap flex.** Adding the issue
-  chips pushed the edit and delete buttons to 399px and 428px on a 375px screen — unreachable,
-  with no horizontal scroll to go find them. It also took "Selected Ambient Works 85-92" from
-  84px to **9px**, because the chips carry `flex-shrink: 0` and the titles don't. Both are
-  fixed in the responsive block (`.library-album-head` wraps, `.library-album-titles` claims
-  60%). **Anything else added to those rows needs measuring at 375px**, not eyeballing.
+- ~~New chips in the album rows do not shrink~~ **The rows are gone (v0.6.5), the lesson isn't.**
+  Adding issue chips to the old nowrap album rows pushed the edit and delete buttons off a 375px
+  screen and took "Selected Ambient Works 85-92" from 84px to **9px**, because chips carry
+  `flex-shrink: 0` and titles don't. The tree rows drop their chips by `@container` query as
+  the tree narrows, for exactly that reason. **Anything added to a tree row needs measuring at
+  the tree's narrowest width (260px)**, not eyeballing.
+- **An id containing NUL can never be found by `querySelector`.** Album group keys are built
+  with a ` ` separator (the Read tool DISPLAYS it as a space - it isn't one), and
+  `CSS.escape()` turns NUL into U+FFFD, as the spec requires. So `[data-node="${CSS.escape(id)}"]`
+  silently matched nothing for every album and track: arrow keys moved the selection while
+  focus stayed on the row you left, and only artist rows (no NUL) worked. The tree now compares
+  `dataset.node` directly. The same misreading built a group id by hand with a space, which
+  resolved to nothing - **never rebuild a node id by hand; go through `lib/libraryTree.ts`.**
+- **Current Chrome ignores every `::-webkit-scrollbar` rule on an element that sets
+  `scrollbar-width` or `scrollbar-color`.** `.scrollable` set both, so the Windows 7 scrollbars
+  applied in Safari only. The Windows 7 block resets both to `auto` first; if the scrollbars
+  ever look flat again in Chrome, look for one of those two properties having crept back.
 
 ### Backend and data
 
@@ -865,7 +959,8 @@ Each of these cost real time. Don't rediscover them.
   with a picture of a CD. Selection goes through `PICTURE_TYPE_PREFERENCE`, never by order.
   The same trap applies to ID3 `APIC` frames (there can be several, keyed by description)
   and to loose files — a lone `disc.jpg` is not the cover.
-- **`/library/art` is the only endpoint that turns user input into a filesystem read.** It
+- **`/library/art` was the first endpoint to turn user input into a filesystem read**, and
+  `/library/tracks` and `/deletion_summary` copy its guard. It
   takes a path relative to LIBRARY_PATH, so `is_within()` containment is load-bearing, not
   decoration — without it `?album=../../..` reads anything the container user can. It
   answers 404 identically for "outside the library" and "no such album" so a probe learns
@@ -956,6 +1051,27 @@ same-origin with the app by design.
   it happens at import. **`npm run typecheck` still works and still checks everything**;
   `npm run build` needs the Node upgrade. The one thing to not do is go looking for the bug in
   `ui/`.
+- **Past that, on this machine, `vite build` HANGS - and bare rolldown doesn't.** A preload shim
+  that teaches `util.styleText` to take an array (and calls `syncBuiltinESMExports()`) gets vite
+  imported, but the build then sat at 0% CPU for seven minutes with every `rolldown-worker`
+  thread parked. Running rolldown's own CLI on the same input finished in **68ms**:
+  `node --import <shim>.mjs node_modules/rolldown/bin/cli.mjs -c <config>.mjs`, with a config of
+  `input: src/main.tsx`, `tsconfig: tsconfig.json` (it reads jsx/jsxImportSource from there),
+  `platform: 'browser'` and `output.file: ../interface/dist/jimbrainz-ui.js`. The Preact preset
+  only adds dev-time plugins, so a production bundle loses nothing. It is a LOCAL workaround -
+  Docker builds on node:22 through vite as normal, and the real fix is still the Node upgrade.
+- **This checkout lives in iCloud-optimised storage, and much of it is evicted.** `ls -lO`
+  shows `compressed,dataless` on files across `node_modules/` and `.venv/`, so the first read
+  of each one is a download: the pytest suite took **125s** cold and **1.4s** warm, and a
+  faulthandler dump caught it 25s into importing mutagen. A tool that seems hung here is far
+  more often fetching than stuck - check `ps` for CPU before killing it. (The vite hang above was
+  NOT this: 0% CPU and parked threads, where a fetch shows I/O.)
+- **The browser preview tool reads `~/Desktop/Code/.claude/launch.json` - the PARENT folder's -
+  not this repo's.** A configuration added to `jimbrainz/.claude/launch.json` is invisible to
+  it. Fixture servers from past sessions (LIBRARY_PATH and DB_PATH pointed at a scratchpad
+  library) live there, and that is the pattern: a throwaway library of real FLACs with real
+  tags, and a throwaway database, so `.devdata` is never touched. The server's port is fixed at
+  8080 in `src/main.py`, so only one runs at a time.
 
 ## Known performance problems (profiled, not guessed)
 
@@ -1050,7 +1166,7 @@ the page, and ported panels mount into it via one extra module script.
 
 | ported | still vanilla |
 | --- | --- |
-| Downloads panel, tab shell, library view, metadata editor, metadata queue, delete dialog | search bar, releases grid, filter column, candidates panel, log |
+| Downloads panel, tab shell, library explorer (tree + details pane), metadata editor, metadata queue, delete dialog, cover viewer | search bar, releases grid, filter column, candidates panel, log |
 
 **How the two halves coexist:**
 
@@ -1116,7 +1232,7 @@ compile time.
 
 ```bash
 .venv/bin/python -m src.main          # needs .env; DB_PATH=.devdata/jimbrainz.db
-.venv/bin/python -m pytest tests/ -q  # 370 tests
+.venv/bin/python -m pytest tests/ -q  # 403 tests
 ```
 
 Frontend, from `ui/`. **Needs Node `^20.19.0 || >=22.12.0`** — see the npm gotcha above:
@@ -1133,6 +1249,7 @@ node ui/test/speed.sim.cjs      # the derived download rate, simulated against a
 node ui/test/queue.sim.cjs      # the tab badge and the review queue agreeing on what's outstanding
 node ui/test/downloads.sim.cjs  # the downloads panel's optimistic overlays, incl. the wrong-prediction paths
 node ui/test/sort.sim.cjs       # result ordering - undated groups, ties, and relevance-as-no-op
+node ui/test/tree.sim.cjs       # the library tree - what's on screen when, filtering, discs, field choices
 ```
 
 `npm run dev` serves `ui/index.html`, a harness for working on one component in isolation with
@@ -1143,7 +1260,7 @@ HMR — **not** the real page. The real page is still `interface/index.html` ser
 
 ## What the tests cannot tell you
 
-All 370 tests are fixture-driven. **Nothing has ever talked to a real slskd.** The parts most
+All 403 tests are fixture-driven. **Nothing has ever talked to a real slskd.** The parts most
 likely to break on deployment are exactly the parts tests can't reach:
 
 - slskd transfer `state` strings. **This one already came true**: `"Completed, Rejected"` was
@@ -1187,6 +1304,16 @@ A green suite here means the logic is sound, not that it works against real infr
    overflow, what genuine `signals` distributions look like, or whether the query box and
    re-search behave against a live search. **Stubbing the fetch is a cheap way to look at
    this panel again** — it needs no slskd and takes one `window.fetch` override.
+8. **Recapture `assets/images/library.png`.** It still shows the pre-v0.6.5 album-row library;
+   the README text describes the explorer. Use the screenshot harness described above.
+9. **An album stored one folder per disc shows as "editions".** The scan treats every folder
+   holding audio as an album, so `Album (Disc 1)` and `Album (Disc 2)` group as two editions of
+   one album - and applying the release to each tags them correctly (the title matcher finds
+   each disc's tracks) but then wants to re-file both into the same `Album (Year)` folder, and
+   the second is refused as "already exists". Now that the scan reads `discnumber`, folders
+   sharing a release MBID but holding different discs are detectable; nothing acts on it yet.
+10. **Upgrade the local Node to 22** so `npm run build` works again without the rolldown
+    workaround in the tooling notes.
 
 ### Deliberately not built
 
@@ -1198,8 +1325,11 @@ Worth knowing before someone "fixes" one of these:
   prefers and it's one write instead of one per track.
 - **Undo.** For retag or delete. The preview is the safety net for the first, and the
   confirmation dialog for the second — so keep both honest.
-- **Persisting the scan cache.** It's in memory, so a restart rescans. Was started and backed
-  out as out of scope; the per-folder mtime cache makes the rescan cheap.
+- ~~Persisting the scan cache~~ **Built in v0.6.5, because James asked for it** - "so the scan
+  doesn't take so long and I can still see what's in the library without a full scan every
+  time". The old objection (the per-folder mtime cache makes a rescan cheap) was right about
+  tag reads and wrong about the walk: on a network share or a spun-down array, statting every
+  folder IS the wait, and a restart threw away every tag read on top. See "The saved scan".
 - **Bulk apply in the metadata queue.** Considered and deliberately declined for the first cut.
   Auto-matching releases across many albums at once would write tags to albums nobody looked
   at, and **there is no undo** — the preview is the safety net, and a bulk action is precisely

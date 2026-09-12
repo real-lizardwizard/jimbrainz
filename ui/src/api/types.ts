@@ -36,9 +36,17 @@ export type ClearableStatus = Extract<
 >
 
 export interface Track {
+  /** The RUNNING number across every disc — what the matcher keys on and files are named after. */
   position: number | null
   title: string
   length_ms: number | null
+  /**
+   * Which disc (MusicBrainz's medium position) and where on it. A multi-disc release is tagged
+   * with these rather than the running number — see organizer.tag_values. Optional because
+   * a release-group download has no tracklist at all.
+   */
+  disc?: number | null
+  disc_position?: number | null
 }
 
 /**
@@ -315,6 +323,11 @@ export interface LibraryTrack {
   has_title_tag: boolean
   /** null when the file carries no readable track number. Sorts last rather than as 0. */
   position: number | null
+  /**
+   * From the discnumber tag. null for the ordinary untagged file, which orders as disc 1.
+   * Track numbers restart on every disc, so this is what keeps a two-disc set in order.
+   */
+  disc: number | null
   /** seconds */
   length: number
   size: number
@@ -323,6 +336,7 @@ export interface LibraryTrack {
   album: string
   albumartist: string
   date: string
+  originaldate: string
   release_mbid: string
 }
 
@@ -359,6 +373,8 @@ export interface LibraryAlbum {
    */
   art_mtime: number
   track_count: number
+  /** Distinct disc numbers the files are TAGGED with — 0 when untagged, not a guessed 1. */
+  disc_count: number
   total_size: number
   /** seconds */
   duration: number
@@ -431,7 +447,16 @@ export interface LibraryResponse {
   library_path: string
   /** Set when the library can't be read at all (unset or missing LIBRARY_PATH). Not an error. */
   problem: string | null
-  scanned_at: number
+  /**
+   * Unix seconds when the disk was last actually read. On a snapshot that is the scan it was
+   * saved from, which is what lets the interface say how old it is; null if nobody knows.
+   */
+  scanned_at: number | null
+  /**
+   * True when this came from the saved scan without touching the disk (`?snapshot=true`).
+   * A claim about the last time anyone looked, and presented as one — see useLibrary.
+   */
+  stale: boolean
   album_count: number
   artist_count: number
   scan_seconds: number
@@ -446,6 +471,38 @@ export interface LibraryResponse {
    * remembering what you ignored, the same way downloads still work untracked.
    */
   review_tracking_enabled: boolean
+}
+
+/**
+ * One file as it is on disk right now. GET /library/tracks, src/library.py::read_track_details.
+ *
+ * Read live rather than taken from the scan, so this is what the track viewer trusts: the scan
+ * is cached on the folder's mtime, which a retag by any other tool leaves exactly where it was.
+ */
+export interface TrackDetails {
+  filename: string
+  format: string
+  size: number
+  /** seconds */
+  length: number
+  /** bits per second. For lossless this is size over length, which is what every player shows. */
+  bitrate: number | null
+  sample_rate: number | null
+  /** null for lossy formats, which have no fixed bit depth — never a made-up 16. */
+  bits_per_sample: number | null
+  channels: number | null
+  codec: string
+  position: number | null
+  disc: number | null
+  /** Named tags through mutagen's easy interface, so a key means the same thing in any container. */
+  tags: Record<string, string>
+  /** Every tag in the file under its container's own name. Pictures and blobs are left out. */
+  raw: [string, string][]
+}
+
+export interface TrackDetailsResponse {
+  album: string
+  files: TrackDetails[]
 }
 
 /**
@@ -499,6 +556,9 @@ export interface RetagFileChange {
   matched: boolean
   track_title: string
   track_position: number | null
+  /** The disc and per-disc number this file would be tagged with. null on a single-disc release. */
+  track_disc: number | null
+  track_disc_position: number | null
   /** Only the tags that would actually change, keyed by tag name. */
   changes: Record<string, { from: string; to: string }>
 }

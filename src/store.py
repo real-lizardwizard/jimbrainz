@@ -118,6 +118,35 @@ CREATE TABLE IF NOT EXISTS peer_speed (
     last_bytes_sec  REAL NOT NULL,
     last_seen       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS library_cache (
+    -- The library scan cache, saved so a restart starts from it rather than re-reading every
+    -- tag in the library. One row per album folder: exactly what library._album_cache holds in
+    -- memory, keyed the same way (the folder's absolute path).
+    --
+    -- A CACHE, not a record. Every row is validated against the folder's mtime before it is
+    -- trusted, as it is in memory, and losing the whole table costs one slow scan and nothing
+    -- else. Nothing about what the user decided lives here - that is album_review.
+    --
+    -- `format` is library.SCAN_FORMAT when the row was written. Other formats are ignored on
+    -- load and swept on save: an old row would otherwise be served forever for any folder
+    -- nobody has touched since the upgrade, missing whatever field the new version added.
+    path    TEXT PRIMARY KEY,
+    root    TEXT NOT NULL,
+    mtime   REAL NOT NULL,
+    format  INTEGER NOT NULL,
+    album   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_library_cache_root ON library_cache(root, format);
+
+CREATE TABLE IF NOT EXISTS library_scan (
+    -- When each library root was last actually read from disk, so a snapshot drawn from the
+    -- cache can say how old it is instead of passing itself off as the current state.
+    root          TEXT PRIMARY KEY,
+    scanned_at    REAL NOT NULL,
+    scan_seconds  REAL NOT NULL,
+    album_count   INTEGER NOT NULL
+);
 """
 
 #? queued/downloading/complete are phase 2. organizing/organized land with the organizer.
@@ -716,6 +745,122 @@ class JobStore:
         except Exception as e:
             logger.error(f"failed to read measured peer speeds: {e}")
             return {}
+
+    # ===== the saved library scan =============================================
+    #
+    # A cache, persisted. Everything here degrades to "scan from nothing", which is exactly
+    # what every restart did before this existed - so no failure below is worth more than a log.
+
+    async def load_library_cache(self, root: str, fmt: int) -> list[tuple[str, float, dict]]:
+        """
+        Every saved scan entry for this library root, in the current format.
+
+        Parsed in the worker thread along with the read: a large library's JSON is tens of
+        milliseconds to decode, which is too long to hold the event loop for. A row that won't
+        parse is skipped rather than failing the lot.
+        """
+        if not self.available or not root:
+            return []
+
+        def read():
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT path, mtime, album FROM library_cache WHERE root = ? AND format = ?",
+                    (root, fmt),
+                ).fetchall()
+
+            entries = []
+            for row in rows:
+                try:
+                    entries.append((row["path"], float(row["mtime"]), json.loads(row["album"])))
+                except (ValueError, TypeError):
+                    continue
+            return entries
+
+        try:
+            return await asyncio.to_thread(read)
+        except Exception as e:
+            logger.error(f"could not read the saved library scan, it will be rebuilt ({e})")
+            return []
+
+    async def save_library_cache(
+        self,
+        root: str,
+        upserts: list[tuple[str, float, dict]],
+        removals: list[str],
+        fmt: int,
+    ) -> bool:
+        """Write changed scan entries and delete removed ones, in one transaction."""
+        if not self.available or not root:
+            return False
+
+        def write():
+            with self._connect() as connection:
+                if removals:
+                    connection.executemany(
+                        "DELETE FROM library_cache WHERE path = ?", [(p,) for p in removals]
+                    )
+                if upserts:
+                    connection.executemany(
+                        "INSERT INTO library_cache (path, root, mtime, format, album) "
+                        "VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT(path) DO UPDATE SET root = excluded.root, "
+                        "mtime = excluded.mtime, format = excluded.format, album = excluded.album",
+                        [(path, root, mtime, fmt, json.dumps(album))
+                         for path, mtime, album in upserts],
+                    )
+                #? rows an older version wrote can never be loaded again - see the schema note
+                connection.execute("DELETE FROM library_cache WHERE format != ?", (fmt,))
+            return True
+
+        try:
+            return await asyncio.to_thread(write)
+        except Exception as e:
+            logger.error(f"could not save the library scan ({e})")
+            return False
+
+    async def record_library_scan(
+        self, root: str, scanned_at: float, scan_seconds: float, album_count: int,
+    ) -> bool:
+        """Note that this root was just read from disk."""
+        if not self.available or not root:
+            return False
+
+        def write():
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO library_scan (root, scanned_at, scan_seconds, album_count) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(root) DO UPDATE SET scanned_at = excluded.scanned_at, "
+                    "scan_seconds = excluded.scan_seconds, album_count = excluded.album_count",
+                    (root, scanned_at, scan_seconds, album_count),
+                )
+            return True
+
+        try:
+            return await asyncio.to_thread(write)
+        except Exception as e:
+            logger.error(f"could not record the library scan time ({e})")
+            return False
+
+    async def library_scan_info(self, root: str) -> dict | None:
+        """When this root was last read from disk, or None if it never has been."""
+        if not self.available or not root:
+            return None
+
+        def read():
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT scanned_at, scan_seconds, album_count FROM library_scan WHERE root = ?",
+                    (root,),
+                ).fetchone()
+            return dict(row) if row else None
+
+        try:
+            return await asyncio.to_thread(read)
+        except Exception as e:
+            logger.error(f"could not read the library scan time ({e})")
+            return None
 
 
 #? slskd reports a stopped transfer as "Completed, <substate>". "Succeeded" is the only good

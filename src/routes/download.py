@@ -15,9 +15,15 @@ router = APIRouter()
 
 
 class Track(BaseModel):
+    #? the RUNNING number across every disc - what the matcher keys on and files are named after
     position: int | None = None
     title: str = ""
     length_ms: int | None = None
+    #? Which disc, and where on it. Declared rather than left to ride along because pydantic
+    #? drops undeclared fields without a word, and a multi-disc download would then be tagged
+    #? 1..20 with no disc numbers - quietly unlike the same album corrected in the editor.
+    disc: int | None = None
+    disc_position: int | None = None
 
 
 class FindCandidatesRequest(BaseModel):

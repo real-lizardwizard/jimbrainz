@@ -22,16 +22,42 @@ expensive part and most of a library doesn't change between two visits to the pa
 
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
 from src.logger import logger
 from src.matching import AUDIO_EXTENSIONS, file_extension
 
+#? The shape of what read_album_dir() returns, as a number. BUMP IT whenever that dict gains,
+#? loses or changes a field. The cache below is persisted to SQLite and outlives the process,
+#? so an entry written by an older version would otherwise be served forever - the folder's
+#? mtime hasn't moved, so nothing would ever re-read it - and the new field would simply be
+#? missing from every album nobody has touched since the upgrade.
+#?   1  the original shape
+#?   2  tracks carry `disc`, albums carry `disc_count`
+SCAN_FORMAT = 2
+
 #? path -> (mtime, album dict). Reading tags costs milliseconds per file and a real library
 #? is thousands of files, so a rescan re-reads only the folders that actually changed. The
 #? walk itself is cheap; opening files is not.
+#?
+#? The dicts in here are never handed out directly - every scan returns shallow copies. The
+#? response is decorated in place further down the line (_mark_multi_edition, attach_issues),
+#? and decorating the cached dict itself is how an album used to go on calling itself
+#? "Standard" after its only sibling was deleted.
 _album_cache: dict[str, tuple[float, dict]] = {}
+
+#? Cache keys changed since the route last persisted them: read fresh, or dropped. Kept here
+#? rather than diffed by the caller because only the scan knows which folders it actually
+#? re-read - comparing two whole caches would cost more than the save it decides on.
+_dirty: set[str] = set()
+_removed: set[str] = set()
+
+#? Serialises scans. Two at once would both re-read every changed folder, and the tidy-up
+#? loop at the end of one iterates the cache while the other mutates it. Snapshots do NOT take
+#? it: they exist to answer while a slow scan is running, and dict.copy() is atomic.
+_scan_lock = threading.Lock()
 
 #? Conventional cover filenames, in preference order. These are what the organizer carries
 #? across as companion files and what every other music tool writes.
@@ -254,6 +280,11 @@ def read_track(path: Path) -> dict | None:
         "title": tagged_title or path.stem,
         "has_title_tag": bool(tagged_title),
         "position": _track_number(_first(audio, "tracknumber")),
+        #? None for the overwhelming majority of files, which carry no disc tag - and that is
+        #? read as disc 1 for ordering rather than as a problem. It matters only for multi-disc
+        #? sets, where track numbers restart on every disc and ordering on them alone deals
+        #? the two discs out alternately.
+        "disc": _track_number(_first(audio, "discnumber")),
         "length": round(length, 1),
         "size": size,
         "format": file_extension(path.name),
@@ -266,6 +297,19 @@ def read_track(path: Path) -> dict | None:
         "originaldate": _first(audio, "originaldate"),
         "release_mbid": _first(audio, "musicbrainz_albumid"),
     }
+
+
+def track_order(track: dict) -> tuple:
+    """
+    Running order: disc, then track number, then filename.
+
+    Disc first because a multi-disc set restarts its numbering on every disc - sorting on the
+    number alone interleaves them, 1, 1, 2, 2, 3, 3. An untagged disc counts as disc 1, so the
+    ordinary single-disc album sorts exactly as it always has. Unnumbered tracks go last
+    within their disc rather than first as a 0 would.
+    """
+    position = track.get("position")
+    return (track.get("disc") or 1, position is None, position or 0, track.get("filename") or "")
 
 
 def _commonest(values: list[str], fallback: str = "") -> str:
@@ -315,7 +359,7 @@ def read_album_dir(directory: Path, library_root: Path) -> dict | None:
     if not tracks:
         return None
 
-    tracks.sort(key=lambda t: (t["position"] is None, t["position"] or 0, t["filename"]))
+    tracks.sort(key=track_order)
 
     #? Recorded during the scan so the interface knows whether asking for art is worth a
     #? request at all. The embedded check costs one extra file open per album, which is
@@ -377,6 +421,9 @@ def read_album_dir(directory: Path, library_root: Path) -> dict | None:
         "art_mtime": art_mtime,
         "path": relative,
         "track_count": len(tracks),
+        #? distinct disc numbers the files are TAGGED with, so 0 for an untagged album rather
+        #? than a guessed 1. Above 1 is a multi-disc set, which the viewer splits by disc.
+        "disc_count": len({t["disc"] for t in tracks if t["disc"]}),
         "total_size": sum(t["size"] for t in tracks),
         "duration": round(sum(t["length"] for t in tracks), 1),
         "formats": sorted({t["format"] for t in tracks if t["format"]}),
@@ -398,8 +445,13 @@ def clear_scan_cache() -> None:
     Used when LIBRARY_PATH itself changes. Every entry is keyed on a directory under the OLD
     root and validated against that folder's mtime, so after a root change the cache is not
     merely stale - its keys refer to paths that are no longer part of the library at all.
+
+    Only the in-memory copy. Persisted rows are keyed on their root as well as their path, so
+    the old root's rows simply stop being loaded - and come back if the path is changed back.
     """
     _album_cache.clear()
+    _dirty.clear()
+    _removed.clear()
 
 
 def forget_cached_album(directory: str) -> None:
@@ -411,8 +463,112 @@ def forget_cached_album(directory: str) -> None:
     assumed. Without this, retagging an album in place is invisible to the scanner and the
     interface keeps showing the old values until someone forces a full rescan, which reads
     exactly like the edit silently failed.
+
+    Recorded as removed, so the persisted copy goes too. Forgetting only the memory would be
+    undone by the next restart, which would load the pre-edit tags straight back in from disk
+    against a folder mtime that still matches them.
     """
     _album_cache.pop(directory, None)
+    _dirty.discard(directory)
+    _removed.add(directory)
+
+
+def seed_cache(entries: list[tuple[str, float, dict]]) -> int:
+    """
+    Fill the in-memory cache from persisted entries. Returns how many were taken.
+
+    Never overwrites an entry already in memory: anything there was read in this process and is
+    at least as fresh as a row saved by an earlier one. Seeding is not a scan - nothing is
+    marked dirty, since these rows are by definition what is already saved.
+    """
+    taken = 0
+    for path, mtime, album in entries:
+        if path not in _album_cache:
+            _album_cache[path] = (mtime, album)
+            taken += 1
+    return taken
+
+
+def drain_cache_changes() -> tuple[list[tuple[str, float, dict]], list[str]]:
+    """
+    What has changed since the last call: entries to save, and cache keys to delete.
+
+    Called by the route after every scan and every forget, so what is persisted tracks what is
+    in memory. Draining without the scan lock is deliberate - `list(a_set)` is atomic under the
+    GIL, and a change landing between the copy and the clear is simply picked up next time.
+    """
+    dirty = list(_dirty)
+    _dirty.difference_update(dirty)
+    removed = list(_removed)
+    _removed.difference_update(removed)
+
+    upserts = []
+    for path in dirty:
+        entry = _album_cache.get(path)
+        if entry is not None:
+            upserts.append((path, entry[0], entry[1]))
+
+    return upserts, removed
+
+
+def _relative_to(path: str, root: Path) -> str | None:
+    """The cache key as the scan's relative album path, or None if it isn't under this root."""
+    try:
+        return str(Path(path).relative_to(root))
+    except ValueError:
+        return None
+
+
+def _unreadable(library_root: str, problem: str) -> dict:
+    return {"albums": [], "artists": [], "library_path": library_root, "problem": problem,
+            "scanned_at": time.time(), "album_count": 0, "artist_count": 0,
+            "scan_seconds": 0.0, "cached": 0, "stale": False}
+
+
+def _assemble(albums: list[dict], library_root: str, **extra) -> dict:
+    """The response shape shared by a real scan and a snapshot, so the two cannot drift."""
+    _mark_multi_edition(albums)
+    albums.sort(key=lambda a: (a["artist"].lower(), a["album"].lower(), a["edition"].lower()))
+
+    return {
+        "albums": albums,
+        "artists": _summarize_artists(albums),
+        "library_path": library_root,
+        "problem": None,
+        "album_count": len(albums),
+        "artist_count": len({a["artist"] for a in albums}),
+        **extra,
+    }
+
+
+def snapshot_library(library_root: str) -> dict | None:
+    """
+    The library as the cache last saw it, WITHOUT touching the disk. None if nothing is cached.
+
+    This is what makes opening the library instant. A real scan still walks every folder and
+    stats it, which on a network share or a spun-down array is the slow part - and after a
+    restart, with the cache loaded back from SQLite, it is the ONLY part. So the interface asks
+    for this first, draws it, and then asks for a real scan to catch up underneath it.
+
+    `stale` is True on the result, always: this is a claim about the last time anyone looked,
+    and the interface says as much rather than presenting it as the current state of the disk.
+    """
+    if not library_root:
+        return None
+
+    root = str(Path(library_root))
+    prefix = root.rstrip(os.sep) + os.sep
+    #? copied first: a scan may be running in another thread, and dict.copy() is atomic where
+    #? iterating the live dict is not
+    entries = [album for path, (_, album) in _album_cache.copy().items()
+               if path == root or path.startswith(prefix)]
+
+    if not entries:
+        return None
+
+    albums = [dict(album) for album in entries]
+    return _assemble(albums, library_root, scanned_at=None, scan_seconds=0.0,
+                     cached=len(albums), stale=True)
 
 
 def scan_library(library_root: str, force: bool = False) -> dict:
@@ -426,19 +582,34 @@ def scan_library(library_root: str, force: bool = False) -> dict:
     started = time.perf_counter()
 
     if not library_root:
-        return {"albums": [], "artists": [], "library_path": "",
-                "problem": "LIBRARY_PATH is not set", "scanned_at": time.time(),
-                "album_count": 0, "artist_count": 0, "scan_seconds": 0.0, "cached": 0}
+        return _unreadable("", "LIBRARY_PATH is not set")
 
     root = Path(library_root)
     if not root.is_dir():
-        return {"albums": [], "artists": [], "library_path": library_root,
-                "problem": f"LIBRARY_PATH does not exist or is not a directory: {library_root}",
-                "scanned_at": time.time(), "album_count": 0, "artist_count": 0,
-                "scan_seconds": 0.0, "cached": 0}
+        return _unreadable(
+            library_root, f"LIBRARY_PATH does not exist or is not a directory: {library_root}"
+        )
 
+    with _scan_lock:
+        albums, reused = _walk(root, force)
+
+    return _assemble(
+        albums, library_root,
+        scanned_at=time.time(),
+        scan_seconds=round(time.perf_counter() - started, 3),
+        cached=reused,
+        stale=False,
+    )
+
+
+def _walk(root: Path, force: bool) -> tuple[list[dict], int]:
+    """Every album under root, reusing cached folders whose mtime hasn't moved. Hold _scan_lock."""
     if force:
+        #? everything goes, persisted rows included - a forced rescan is the escape hatch for
+        #? not trusting the cache, so it must not quietly keep trusting the saved copy of it
+        _removed.update(list(_album_cache))
         _album_cache.clear()
+        _dirty.clear()
 
     albums = []
     reused = 0
@@ -456,7 +627,7 @@ def scan_library(library_root: str, force: bool = False) -> dict:
 
         cached = _album_cache.get(current)
         if cached and cached[0] == mtime:
-            albums.append(cached[1])
+            albums.append(dict(cached[1]))
             reused += 1
             continue
 
@@ -465,28 +636,20 @@ def scan_library(library_root: str, force: bool = False) -> dict:
             continue
 
         _album_cache[current] = (mtime, album)
-        albums.append(album)
+        _dirty.add(current)
+        _removed.discard(current)
+        albums.append(dict(album))
 
     #? drop cache entries for folders that no longer exist, so a long-running container
-    #? doesn't hold a growing map of albums the user deleted months ago
+    #? doesn't hold a growing map of albums the user deleted months ago - and so a restart
+    #? doesn't load them back from the saved copy either
     live = {a["path"] for a in albums}
-    for path in [p for p in _album_cache if str(Path(p).relative_to(root)) not in live]:
+    for path in [p for p in _album_cache if _relative_to(p, root) not in live]:
         _album_cache.pop(path, None)
+        _dirty.discard(path)
+        _removed.add(path)
 
-    _mark_multi_edition(albums)
-    albums.sort(key=lambda a: (a["artist"].lower(), a["album"].lower(), a["edition"].lower()))
-
-    return {
-        "albums": albums,
-        "artists": _summarize_artists(albums),
-        "library_path": library_root,
-        "problem": None,
-        "scanned_at": time.time(),
-        "album_count": len(albums),
-        "artist_count": len({a["artist"] for a in albums}),
-        "scan_seconds": round(time.perf_counter() - started, 3),
-        "cached": reused,
-    }
+    return albums, reused
 
 
 def _mark_multi_edition(albums: list[dict]) -> None:
@@ -636,3 +799,173 @@ def delete_album(library_root: str, album_path: str) -> dict:
     )
 
     return {"deleted": True, "problem": None, **summary}
+
+
+# ---------------------------------------------------------------- the track viewer
+
+#? The tags the viewer gives a proper label to, read through mutagen's easy interface so one
+#? key means the same thing in FLAC, MP3 and M4A. It decides what gets NAMED, not what gets
+#? shown: everything else a file carries still reaches the viewer through `raw` below.
+#? `label` and `organization` are both here because Vorbis files use either and ID3 calls it
+#? organization - the viewer shows whichever is present.
+DETAIL_TAGS = (
+    "title", "artist", "albumartist", "album", "tracknumber", "discnumber", "discsubtitle",
+    "date", "originaldate", "genre", "composer", "conductor", "lyricist", "isrc", "label",
+    "organization", "catalognumber", "barcode", "releasecountry", "media", "bpm", "copyright",
+    "language", "comment", "musicbrainz_trackid", "musicbrainz_releasetrackid",
+    "musicbrainz_albumid", "musicbrainz_releasegroupid", "musicbrainz_artistid",
+    "musicbrainz_albumartistid",
+)
+
+#? Raw keys that hold pictures or opaque blobs. Shown as nothing rather than as megabytes of
+#? base64 or a Python repr - the cover has its own view, and a PRIV frame means nothing to anyone.
+RAW_SKIPPED = ("APIC", "PRIV", "GEOB", "COVR", "METADATA_BLOCK_PICTURE", "MCDI", "RVA2", "PCNT")
+RAW_VALUE_LIMIT = 500
+RAW_TAG_LIMIT = 200
+
+
+def _all_values(audio, key: str) -> str:
+    """Every value for an easy key, joined - a genre or composer tag is often several."""
+    try:
+        values = audio.get(key) or []
+    except Exception:
+        return ""
+    return "; ".join(str(v).strip() for v in values if str(v).strip())
+
+
+def _plain(value) -> str:
+    """
+    One raw tag value as text, whatever container it came out of.
+
+    ID3 hands back frames, MP4 hands back lists of tuples and bytes subclasses, Vorbis hands
+    back lists of strings. The viewer wants a line of text for each, so this flattens rather
+    than trying to preserve any of their structure.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return bytes(value).decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return ""
+    #? MP4 track and disc numbers: (3, 12) means 3 of 12, (3, 0) means no total
+    if isinstance(value, tuple) and value and all(isinstance(v, int) for v in value):
+        return "/".join(str(v) for v in value if v)
+    if isinstance(value, (list, tuple)):
+        return "; ".join(part for part in (_plain(v) for v in value) if part)
+
+    #? an ID3 frame. Text frames carry `.text`, URL frames `.url`, UFID its bytes in `.data`
+    for attribute in ("text", "url", "data"):
+        inner = getattr(value, attribute, None)
+        if inner is not None:
+            return _plain(inner if isinstance(inner, (str, bytes)) else list(inner))
+
+    return str(value).strip()
+
+
+def _raw_tags(path: Path) -> list[list[str]]:
+    """Every tag in the file under its container's own name, pictures and blobs excepted."""
+    import mutagen
+
+    try:
+        audio = mutagen.File(str(path))
+        items = list(audio.tags.items()) if audio is not None and audio.tags is not None else []
+    except Exception:
+        return []
+
+    pairs: list[list[str]] = []
+    for key, value in items:
+        name = str(key)
+        if name.upper().startswith(RAW_SKIPPED):
+            continue
+
+        text = _plain(value)
+        if text:
+            pairs.append([name, text[:RAW_VALUE_LIMIT]])
+
+        if len(pairs) >= RAW_TAG_LIMIT:
+            break
+
+    return pairs
+
+
+def _info_number(info, name: str) -> int | None:
+    value = getattr(info, name, None)
+    return int(value) if isinstance(value, (int, float)) and value > 0 else None
+
+
+def read_track_details(path: Path) -> dict | None:
+    """
+    Everything one file says about itself: named tags, audio properties, and every raw tag.
+
+    For the track viewer, and deliberately NOT part of the scan. The scan's payload is the
+    whole library in one response, and carrying thirty tags per track for thousands of tracks
+    would make every visit to the tab pay for detail it only ever shows one album at a time.
+    """
+    import mutagen
+
+    try:
+        audio = mutagen.File(str(path), easy=True)
+    except Exception as e:
+        logger.debug(f"could not read {path.name}: {e}")
+        return None
+
+    if audio is None:
+        return None
+
+    info = getattr(audio, "info", None)
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+
+    length = float(getattr(info, "length", 0) or 0)
+
+    #? FLAC reports no bitrate of its own on older mutagen, and the figure every player shows
+    #? for lossless is simply the file's size over its length anyway
+    bitrate = _info_number(info, "bitrate")
+    if not bitrate and length and size:
+        bitrate = int(size * 8 / length)
+
+    tags = {key: value for key in DETAIL_TAGS if (value := _all_values(audio, key))}
+
+    return {
+        "filename": path.name,
+        "format": file_extension(path.name),
+        "size": size,
+        "length": round(length, 1),
+        "bitrate": bitrate,
+        "sample_rate": _info_number(info, "sample_rate"),
+        #? absent for lossy formats, which have no fixed bit depth - None, never a made-up 16
+        "bits_per_sample": _info_number(info, "bits_per_sample"),
+        "channels": _info_number(info, "channels"),
+        "codec": (getattr(info, "codec", None) or type(audio).__name__.removeprefix("Easy")),
+        "position": _track_number(tags.get("tracknumber", "")),
+        "disc": _track_number(tags.get("discnumber", "")),
+        "tags": tags,
+        "raw": _raw_tags(path),
+    }
+
+
+def read_album_details(directory: Path) -> list[dict]:
+    """read_track_details() for every audio file in one folder, in running order."""
+    try:
+        entries = sorted(p for p in directory.iterdir() if p.is_file())
+    except OSError as e:
+        logger.warning(f"could not list {directory}: {e}")
+        return []
+
+    files = [
+        details for entry in entries
+        if file_extension(entry.name) in AUDIO_EXTENSIONS
+        and (details := read_track_details(entry)) is not None
+    ]
+    files.sort(key=track_order)
+    return files

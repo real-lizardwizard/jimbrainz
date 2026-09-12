@@ -37,17 +37,29 @@ export function detectEditionTags(release: Release): string[] {
   return tags
 }
 
-/** Flatten MusicBrainz's per-disc numbering into one running sequence. */
+/**
+ * Every track of every disc, with both numberings.
+ *
+ * `position` is one running sequence across the whole release, because the matcher keys its
+ * file mapping on it and the organizer names files after it - a 2xCD set has two "track 1"s,
+ * and a folder holding both would otherwise sort them side by side. `disc` and `disc_position`
+ * are MusicBrainz's own numbering, and they are what a multi-disc release is TAGGED with.
+ *
+ * Must produce the same shape as buildExpectedFromRelease() in interface/scripts/main.js, so an
+ * album corrected here carries the same tags as one downloaded fresh.
+ */
 function flattenTracks(release: Release): Track[] {
   const tracks: Track[] = []
   let position = 0
 
-  for (const medium of release.media ?? []) {
+  for (const [discIndex, medium] of (release.media ?? []).entries()) {
     const discTracks = (medium as { tracks?: unknown[] }).tracks ?? []
+    const disc = (medium as { position?: number }).position ?? discIndex + 1
 
-    for (const raw of discTracks) {
+    for (const [trackIndex, raw] of discTracks.entries()) {
       const entry = raw as {
         title?: string
+        position?: number
         length?: number | null
         recording?: { title?: string; length?: number | null }
       }
@@ -56,6 +68,8 @@ function flattenTracks(release: Release): Track[] {
         position,
         title: entry.recording?.title || entry.title || '',
         length_ms: entry.recording?.length ?? entry.length ?? null,
+        disc,
+        disc_position: entry.position ?? trackIndex + 1,
       })
     }
   }

@@ -7,6 +7,7 @@ import type {
   LibraryAlbum, MetadataIssueType, Release, RetagPlan, RetagRelease,
 } from '../api/types'
 import { albumArtUrl } from '../lib/format'
+import { ArtViewer } from './ArtViewer'
 import { Loading, LoadingPanel } from './Loading'
 import { issueLabel, outstandingIssues } from '../lib/metadataQueue'
 import {
@@ -95,10 +96,14 @@ const PREVIEW_DEBOUNCE_MS = 400
  * is how you decide whether you want it.
  */
 function ArtComparison(
-  { album, releaseId }: { album: LibraryAlbum; releaseId: string | null },
+  { album, releaseId, onOpen }:
+  { album: LibraryAlbum; releaseId: string | null; onOpen: () => void },
 ) {
   const [currentFailed, setCurrentFailed] = useState(false)
   const [incomingFailed, setIncomingFailed] = useState(false)
+  //? the current cover is served whole, so its natural size IS its real resolution - worth
+  //? saying beside it, since resolution is usually what the choice actually comes down to
+  const [currentSize, setCurrentSize] = useState<string | null>(null)
 
   //? reset when the release changes, or a single failure would stick for every later pick
   useEffect(() => setIncomingFailed(false), [releaseId])
@@ -115,10 +120,21 @@ function ArtComparison(
       <div class="metadata-art-slot">
         <span class="text white-tertiary">Current</span>
         {current && !currentFailed ? (
-          <img src={current} alt="" onError={() => setCurrentFailed(true)} />
+          <button type="button" class="metadata-art-open" title="Compare at full size" onClick={onOpen}>
+            <img
+              src={current}
+              alt=""
+              onError={() => setCurrentFailed(true)}
+              onLoad={(event) => {
+                const img = event.currentTarget as HTMLImageElement
+                setCurrentSize(`${img.naturalWidth}×${img.naturalHeight}`)
+              }}
+            />
+          </button>
         ) : (
           <div class="metadata-art-empty">None</div>
         )}
+        {currentSize && <span class="text white-tertiary metadata-art-size">{currentSize}</span>}
       </div>
 
       <span class="metadata-art-arrow text default-secondary">→</span>
@@ -126,18 +142,24 @@ function ArtComparison(
       <div class="metadata-art-slot">
         <span class="text white-tertiary">From this release</span>
         {incoming && !incomingFailed ? (
-          <img
-            src={incoming}
-            alt=""
-            /* keyed so switching releases replaces the element rather than reusing one whose
-               onError already fired */
-            key={releaseId}
-            onError={() => setIncomingFailed(true)}
-          />
+          <button type="button" class="metadata-art-open" title="Compare at full size" onClick={onOpen}>
+            <img
+              src={incoming}
+              alt=""
+              /* keyed so switching releases replaces the element rather than reusing one whose
+                 onError already fired */
+              key={releaseId}
+              onError={() => setIncomingFailed(true)}
+            />
+          </button>
         ) : (
           <div class="metadata-art-empty">{releaseId ? 'none on file' : 'pick a release'}</div>
         )}
       </div>
+
+      <button type="button" class="win-button metadata-art-compare" onClick={onOpen}>
+        Compare full size…
+      </button>
     </div>
   )
 }
@@ -209,6 +231,8 @@ export function MetadataEditor(
   //? one rides along with an apply, this one writes the cover and nothing else
   const [savingArt, setSavingArt] = useState(false)
   const [artResult, setArtResult] = useState<string | null>(null)
+  //? the two covers side by side at full size - see ArtViewer
+  const [comparingArt, setComparingArt] = useState(false)
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -651,6 +675,9 @@ export function MetadataEditor(
               : album.year || 'no year'}
           </span>
           <span class="text white-tertiary">{album.track_count} tracks</span>
+          {album.disc_count > 1 && (
+            <span class="text white-tertiary">{album.disc_count} discs</span>
+          )}
           <span class={taggedRelease ? 'metadata-mbid' : 'text yellow'}>
             {taggedRelease
               ? `${taggedRelease.slice(0, 8)}…`
@@ -713,7 +740,13 @@ export function MetadataEditor(
                   <span class="metadata-release-detail text default-muted">
                     {[release.date?.substring(0, 4), describeRelease(release)].filter(Boolean).join(' · ')}
                   </span>
-                  <span class={`metadata-release-tracks${tracks && tracks !== album.track_count ? ' mismatch' : ''}`}>
+                  <span
+                    class={`metadata-release-tracks${tracks && tracks !== album.track_count ? ' mismatch' : ''}`}
+                    title={(release.media ?? []).length > 1
+                      ? (release.media ?? []).map((m, i) => `disc ${i + 1}: ${m['track-count'] ?? '?'} tracks`).join(', ')
+                      : undefined}
+                  >
+                    {(release.media ?? []).length > 1 ? `${(release.media ?? []).length} discs · ` : ''}
                     {tracks || '?'} trk
                   </span>
                 </button>
@@ -765,7 +798,7 @@ export function MetadataEditor(
               original year and the edition, so a remaster files under the album's own year.
             </span>
 
-            <ArtComparison album={album} releaseId={selectedId} />
+            <ArtComparison album={album} releaseId={selectedId} onOpen={() => setComparingArt(true)} />
 
             {/*
               Just the cover, nothing else. The checkbox below rides along with an apply, which
@@ -929,6 +962,44 @@ export function MetadataEditor(
           )}
         </div>
       </div>
+
+      {/*
+        Both covers at full size. The incoming one is the release you have selected, or failing
+        that the one the album is already tagged with - the same id "replace cover only" would
+        fetch, so what the button saves is exactly what you were looking at.
+      */}
+      {comparingArt && (() => {
+        const incomingId = selectedId ?? (album.release_mbid || null)
+        return (
+          <ArtViewer
+            images={[
+              {
+                label: 'Current',
+                sources: album.art ? [albumArtUrl(album)] : [],
+                missing: 'No cover on disk',
+              },
+              {
+                label: selectedId ? 'From this release' : "From the release it's tagged with",
+                sources: incomingId ? [`https://coverartarchive.org/release/${incomingId}/front`] : [],
+                missing: incomingId
+                  ? 'The Cover Art Archive has no front cover for this release, or is unreachable'
+                  : 'Pick a release to see its cover',
+              },
+            ]}
+            onClose={() => setComparingArt(false)}
+            action={incomingId ? {
+              label: album.art ? 'Replace with this cover' : 'Save this cover',
+              title: 'Write the right-hand cover into the album folder and change nothing else',
+              busy: savingArt,
+              //? only once the right-hand cover has actually loaded - see ArtViewer
+              requires: 1,
+              onClick: () => {
+                void saveArtOnly().then(() => setComparingArt(false))
+              },
+            } : undefined}
+          />
+        )
+      })()}
     </div>
   )
 }

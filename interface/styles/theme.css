@@ -152,10 +152,15 @@
    ========================================================================== */
 
 :root {
-    --radius-sm:   4px;   /* chips, badges, inline controls */
-    --radius-md:   6px;   /* buttons, inputs, table rows */
-    --radius-lg:   10px;  /* cards, result boxes */
-    --radius-xl:   14px;  /* dropdowns, dialogs, overlay panels */
+    /*
+      Pulled in for the Windows 7 touch (section 9). Aero's controls are nearly square - a 3px
+      button, a 6px window - and the rounder modern values were most of what made the interface
+      read as a web app rather than a desktop one. Pills stay pills.
+    */
+    --radius-sm:   2px;   /* chips, badges, inline controls */
+    --radius-md:   3px;   /* buttons, inputs, table rows */
+    --radius-lg:   4px;   /* cards, result boxes */
+    --radius-xl:   6px;   /* dropdowns, dialogs, overlay panels */
     --radius-full: 999px; /* pills and circular badges */
 }
 
@@ -335,4 +340,56 @@
     --z-overlay:  200;
     --z-dialog:   300;
     --z-toast:    400;
+}
+
+
+/* ==========================================================================
+   9. A TOUCH OF WINDOWS 7
+   ========================================================================== */
+
+:root {
+    /*
+      Asked for with the library explorer: "a little less modernised, with a touch more of a
+      Windows 7 feel". A TOUCH - the dark palette and the purple accent stay, because they are
+      the identity. What comes back is Aero's shapes: squarer corners (section 4), glossy
+      two-tone fills with a hard midline, a one-pixel highlight along the top edge of anything
+      raised, gradient bars for toolbars and captions, and Explorer's selection - a translucent
+      gradient inside a thin rounded border - in place of flat fills.
+
+      All of it is tokens, so the look can be dialled back from here without touching a rule,
+      the same arrangement as the glow tokens above. A full light-and-blue Aero palette would be
+      a different theme, not a touch, and is deliberately not attempted.
+    */
+    --gloss-button:        linear-gradient(to bottom, #2e2e3c 0%, #272733 47%, #1e1e28 53%, #23232e 100%);
+    --gloss-button-hover:  linear-gradient(to bottom, #3b3150 0%, #332a47 47%, #291f3b 53%, #2f2542 100%);
+    --gloss-button-active: linear-gradient(to bottom, #1c1826 0%, #221c30 100%);
+    --gloss-danger-hover:  linear-gradient(to bottom, #d9786a 0%, #c4513d 47%, #a8321f 53%, #bb4630 100%);
+    --gloss-bar:           linear-gradient(to bottom, #1f1f29 0%, #191921 100%);
+    --gloss-caption:       linear-gradient(to bottom, #2a2738 0%, #201e2c 50%, #1b1a25 100%);
+    --gloss-header:        linear-gradient(to bottom, #22222c 0%, #1b1b23 100%);
+    /* laid OVER a solid accent fill, which is what turns Search and Apply into glass */
+    --gloss-overlay:       linear-gradient(to bottom, rgba(255, 255, 255, 0.2) 0%, rgba(255, 255, 255, 0.07) 48%,
+                                           rgba(0, 0, 0, 0.07) 52%, rgba(0, 0, 0, 0) 100%);
+    --gloss-scroll-thumb:       linear-gradient(to right, #3c3c4c 0%, #333341 50%, #2b2b37 50%, #30303d 100%);
+    --gloss-scroll-thumb-hover: linear-gradient(to right, #4a3e63 0%, #3f3556 50%, #352c49 50%, #3a3050 100%);
+
+    --bevel:         inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    --bevel-strong:  inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    --bevel-pressed: inset 0 1px 2px rgba(0, 0, 0, 0.55);
+    --inset-well:    inset 0 1px 2px rgba(0, 0, 0, 0.45);
+
+    --selection-fill:   linear-gradient(to bottom, rgba(168, 85, 247, 0.32) 0%, rgba(168, 85, 247, 0.18) 100%);
+    --selection-border: rgba(192, 132, 252, 0.6);
+    /* "hot-tracking": what a row does under the pointer before it is chosen */
+    --hot-fill:         linear-gradient(to bottom, rgba(168, 85, 247, 0.14) 0%, rgba(168, 85, 247, 0.06) 100%);
+    --hot-border:       rgba(192, 132, 252, 0.28);
+    /* a selection in a list that doesn't have focus goes grey, as it does in Explorer */
+    --inactive-selection-fill:   linear-gradient(to bottom, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
+    --inactive-selection-border: rgba(255, 255, 255, 0.16);
+
+    /* behind a full-screen viewer */
+    --scrim: rgba(4, 4, 8, 0.8);
+
+    /* how far each level of the library tree steps in */
+    --tree-indent: 18px;
 }

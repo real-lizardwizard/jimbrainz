@@ -1,14 +1,22 @@
-import { useMemo, useRef, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 import { ApiError } from '../api/http'
 import * as libraryApi from '../api/library'
 import type { LibraryAlbum } from '../api/types'
 import { bridge } from '../bridge'
 import { useLibrary } from '../hooks/useLibrary'
+import { useTrackDetails } from '../hooks/useTrackDetails'
+import { formatAge, formatSize } from '../lib/format'
 import { groupAlbums, type AlbumGroup } from '../lib/groupAlbums'
+import {
+  ancestorsOf, groupArtists, indexTree, nodeIdForAlbum, trackNodeId, visibleRows,
+  type Selected, type TreeSort,
+} from '../lib/libraryTree'
 import { isNewImport, issueLabel, queueAlbums } from '../lib/metadataQueue'
+import { readLibraryPaneWidth, writeLibraryPaneWidth } from '../state/persisted'
 import { DeleteAlbumDialog } from './DeleteAlbumDialog'
-import { LibraryAlbumRow } from './LibraryAlbumRow'
+import { LibraryDetails } from './LibraryDetails'
+import { LibraryTree, type NodeRow } from './LibraryTree'
 import { Loading, LoadingPanel } from './Loading'
 import { MetadataEditor } from './MetadataEditor'
 import type { TabId } from './Tabs'
@@ -35,27 +43,33 @@ interface ReviewState {
   index: number
 }
 
+//? the tree pane's width before anyone drags the splitter, and the least either side may have
+const DEFAULT_NAV_WIDTH = 400
+const MIN_NAV_WIDTH = 260
+const MIN_DETAILS_WIDTH = 340
+
+const EMPTY: ReadonlySet<string> = new Set()
+
 /**
- * What's already on disk.
+ * What's already on disk, laid out like a file explorer.
  *
- * Laid out like the search view on purpose - filter column on the left, results in the
- * middle, same controls in the same places - because it answers the neighbouring question
- * and shouldn't feel like a different application. The content differs where the question
- * does: there is an edition column here, and no download buttons.
+ * A tree on the left - artists, their albums, an album's editions when there are several, then
+ * tracks - and the selected thing in detail on the right. It replaced a list of full-width album
+ * rows that were mostly empty space in the middle and made you scroll past every album to find
+ * one. The tree carries the finding; the pane spends its width on what you found.
  *
- * It also answers a second question the search view never has to: not just what you have, but
- * what is *wrong* with what you have. The metadata queue lives in this view rather than in a
- * tab of its own because every answer to it is an album in this list - the facets narrow the
- * same list, and reviewing opens the same editor the edit button does.
+ * It still answers the second question the search view never has to: not just what you have,
+ * but what is *wrong* with it. The metadata queue lives here as the "Views" above the tree,
+ * because every answer to it is an album in this library - the views narrow the same tree, and
+ * reviewing opens the same editor the command bar does.
  */
 export function LibraryView({ active, onNavigate }: Props) {
   const {
-    albums, artists, queue, issueTypes, reviewTracking,
-    problem, error, loading, loaded, scanSeconds, libraryPath, reload,
+    albums, queue, issueTypes, reviewTracking, problem, error, loading, loaded,
+    stale, scannedAt, scanSeconds, libraryPath, reload,
   } = useLibrary(active)
 
   const [filter, setFilter] = useState('')
-  const [artistFilter, setArtistFilter] = useState<string | null>(null)
   const [multiOnly, setMultiOnly] = useState(false)
   /** Only albums with outstanding metadata issues. */
   const [queueOnly, setQueueOnly] = useState(false)
@@ -63,12 +77,29 @@ export function LibraryView({ active, onNavigate }: Props) {
   const [issueFilter, setIssueFilter] = useState<string | null>(null)
   /** Only albums jimbrainz just filed that haven't been looked at — what the tab badge counts. */
   const [newOnly, setNewOnly] = useState(false)
+  const [sort, setSort] = useState<TreeSort>('name')
   /*
-   * Only has any effect on mobile, where CSS both reveals the toggle and acts on the class.
-   * Starts collapsed because on a phone a 190px artist list above the albums pushes the
-   * first one most of the way off the screen, and the albums are what you came for.
+   * Only has any effect on a phone, where CSS both reveals the toggle and acts on the class.
+   * Starts collapsed because on a phone the views above the tree push the first artist most of
+   * the way off the screen, and the library is what you came for.
    */
-  const [filtersCollapsed, setFiltersCollapsed] = useState(true)
+  const [viewsCollapsed, setViewsCollapsed] = useState(true)
+
+  /* ----- the tree ----- */
+
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(EMPTY)
+  /** Artists or albums closed by hand while a filter had opened them. Reset with the filter. */
+  const [closed, setClosed] = useState<ReadonlySet<string>>(EMPTY)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [focusToken, setFocusToken] = useState(0)
+  const [revealToken, setRevealToken] = useState(0)
+  /** Phones: the details pane is a sheet over the tree, open once something has been picked. */
+  const [sheetOpen, setSheetOpen] = useState(false)
+
+  const [navWidth, setNavWidth] = useState(() => readLibraryPaneWidth() ?? DEFAULT_NAV_WIDTH)
+  const panesRef = useRef<HTMLDivElement>(null)
+
+  /* ----- the editor, the queue and the bulk actions ----- */
 
   /*
    * Which album the metadata editor is open for, or null. One at a time on purpose - it is an
@@ -93,18 +124,16 @@ export function LibraryView({ active, onNavigate }: Props) {
    * after an apply, where the release list on screen is still the right one and re-searching
    * MusicBrainz would be wasted. Moving to a different album is the opposite case: nothing
    * about the previous one applies, so it wants a genuinely fresh component, which is what
-   * changing the key gives us. Re-mounting is also what re-runs its search-on-open, so each
-   * album in the queue arrives with candidates already being fetched.
+   * changing the key gives us.
    */
   const [session, setSession] = useState(0)
 
   /**
    * A bulk cover fetch in progress, or the summary of the last one.
    *
-   * Driven from here one album at a time rather than by a single server-side endpoint, for
-   * three reasons that all point the same way: you can watch it happen, you can stop it, and
-   * every album goes through the exact same tested route a single "get art" click does. A
-   * server-side loop would be one long opaque request that either finishes or doesn't.
+   * Driven from here one album at a time rather than by a single server-side endpoint: you can
+   * watch it happen, you can stop it, and every album goes through the exact same tested route
+   * a single "get cover" click does.
    */
   const [bulkArt, setBulkArt] = useState<{
     total: number
@@ -122,27 +151,72 @@ export function LibraryView({ active, onNavigate }: Props) {
   //? the album awaiting a delete confirmation, or null
   const [deleting, setDeleting] = useState<LibraryAlbum | null>(null)
 
+  /* ----- what's in view ----- */
+
   //? grouped first, then filtered, so a filter never splits an album from its own editions
   const groups = useMemo(() => groupAlbums(albums), [albums])
 
-  const visible = useMemo(() => {
-    const needle = filter.trim().toLowerCase()
+  //? every node, filtered or not, so a selection survives being filtered out of the tree
+  const allArtists = useMemo(() => groupArtists(groups, sort, isNewImport), [groups, sort])
+  const index = useMemo(() => indexTree(allArtists), [allArtists])
 
-    return groups.filter((group) => {
-      if (artistFilter && group.artist !== artistFilter) return false
+  const needle = filter.trim().toLowerCase()
+  const facetOn = multiOnly || queueOnly || newOnly || issueFilter !== null
+  const filtering = needle !== '' || facetOn
+
+  /*
+   * The filter matches artists, albums and editions - and song titles, which is the part a flat
+   * album list never could: type a song and the tree opens its album to show you where it is.
+   * Only from two characters, because one letter matches half the library's tracks.
+   */
+  const { visibleGroups, trackMatches } = useMemo(() => {
+    const matches = new Set<string>()
+
+    const kept = groups.filter((group) => {
       if (multiOnly && group.editions.length < 2) return false
       if (queueOnly && !group.needsAttention) return false
       if (newOnly && !group.editions.some(isNewImport)) return false
       if (issueFilter && !group.issues.includes(issueFilter)) return false
       if (!needle) return true
 
-      return (
-        group.album.toLowerCase().includes(needle) ||
-        group.artist.toLowerCase().includes(needle) ||
-        group.editions.some((e) => e.edition.toLowerCase().includes(needle))
-      )
+      if (
+        group.album.toLowerCase().includes(needle)
+        || group.artist.toLowerCase().includes(needle)
+        || group.editions.some((e) => e.edition.toLowerCase().includes(needle))
+      ) {
+        return true
+      }
+
+      if (needle.length < 2) return false
+
+      let found = false
+      for (const album of group.editions) {
+        for (const track of album.tracks) {
+          if (track.title.toLowerCase().includes(needle)) {
+            matches.add(trackNodeId(album, track))
+            found = true
+          }
+        }
+      }
+      return found
     })
-  }, [groups, filter, artistFilter, multiOnly, queueOnly, newOnly, issueFilter])
+
+    return { visibleGroups: kept, trackMatches: matches as ReadonlySet<string> }
+  }, [groups, needle, multiOnly, queueOnly, newOnly, issueFilter])
+
+  const artists = useMemo(() => groupArtists(visibleGroups, sort, isNewImport), [visibleGroups, sort])
+
+  //? a new filter opens every match afresh; what you closed under the last one doesn't carry over
+  useEffect(() => setClosed(EMPTY), [needle, multiOnly, queueOnly, newOnly, issueFilter])
+
+  const rows = useMemo(
+    () => visibleRows(artists, { expanded, closedWhileFiltering: closed, filtering, trackMatches }),
+    [artists, expanded, closed, filtering, trackMatches],
+  )
+
+  const selected: Selected = (selectedId ? index.get(selectedId) : undefined) ?? { kind: 'none' }
+  const selectedAlbum = selected.kind === 'album' || selected.kind === 'track' ? selected.album : null
+  const trackDetails = useTrackDetails(selectedAlbum?.path ?? null, albums)
 
   const multiEditionCount = useMemo(
     () => groups.filter((g) => g.editions.length > 1).length,
@@ -159,29 +233,127 @@ export function LibraryView({ active, onNavigate }: Props) {
     [queue.by_issue],
   )
 
-  /**
-   * Albums in the CURRENT VIEW that a cover could be fetched for.
-   *
-   * Scoped to what's on screen so the filters compose with it - narrow to "no cover art", or to
-   * one artist, and the bulk action follows. They must already name a release, because that is
-   * what the Archive is asked about; an album with no release id has nothing to look up.
-   */
-  const artCandidates = useMemo(
-    () => visible.flatMap((group) => group.editions)
-                 .filter((album) => !album.art && album.release_mbid),
-    [visible],
-  )
+  const totals = useMemo(() => ({
+    tracks: albums.reduce((n, a) => n + a.track_count, 0),
+    size: albums.reduce((n, a) => n + a.total_size, 0),
+    duration: albums.reduce((n, a) => n + a.duration, 0),
+  }), [albums])
 
   /**
-   * Fetch covers for all of them, one at a time.
+   * Albums IN VIEW that a cover could be fetched for.
    *
-   * Sequential on purpose. These go out to the Cover Art Archive, which is a third party that
-   * goes unreachable for minutes at a time, and firing thirty parallel requests at it would be
-   * both rude and a good way to turn one slow patch into thirty failures.
+   * Scoped to what the tree is showing so the views compose with it - narrow to "no cover art",
+   * or search for one artist, and the bulk action follows. They must already name a release,
+   * because that is what the Archive is asked about.
+   */
+  const artCandidates = useMemo(
+    () => visibleGroups.flatMap((group) => group.editions)
+                       .filter((album) => !album.art && album.release_mbid),
+    [visibleGroups],
+  )
+
+  /* ----- tree interaction ----- */
+
+  const setOpen = (id: string, open: boolean) => {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (open) next.add(id)
+      else next.delete(id)
+      return next
+    })
+    setClosed((current) => {
+      const next = new Set(current)
+      if (open) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  /** A click in the tree: select it and open it, which is how you walk down into the library. */
+  const activate = (row: NodeRow) => {
+    setSelectedId(row.id)
+    if ((row.kind === 'artist' || row.kind === 'group' || row.kind === 'edition') && !row.open) {
+      setOpen(row.id, true)
+    }
+    //? a phone opens the details as a sheet for anything with details worth a whole screen;
+    //? tapping an artist just opens it in place
+    if (row.kind !== 'artist') setSheetOpen(true)
+  }
+
+  const selectFromKeyboard = (id: string) => {
+    setSelectedId(id)
+    setFocusToken((n) => n + 1)
+  }
+
+  /** Something in the details pane was picked: select it, and open the tree down to it. */
+  const selectFromPane = (id: string) => {
+    setSelectedId(id)
+    const ancestors = ancestorsOf(id, allArtists)
+    if (ancestors.length) {
+      setExpanded((current) => new Set([...current, ...ancestors]))
+      setClosed((current) => new Set([...current].filter((c) => !ancestors.includes(c))))
+    }
+    setRevealToken((n) => n + 1)
+  }
+
+  /* ----- the splitter ----- */
+
+  const clampWidth = (width: number) => {
+    const available = panesRef.current?.clientWidth ?? width + MIN_DETAILS_WIDTH
+    return Math.round(Math.min(Math.max(width, MIN_NAV_WIDTH), Math.max(MIN_NAV_WIDTH, available - MIN_DETAILS_WIDTH)))
+  }
+
+  /**
+   * Drag to resize the tree against the details, as in Explorer. Pointer capture on the handle
+   * means the drag keeps tracking when the cursor outruns it, and the width is saved only on
+   * release rather than written to storage on every pixel.
+   */
+  const startDrag = (event: PointerEvent) => {
+    const handle = event.currentTarget as HTMLElement
+    const panes = panesRef.current
+    if (!panes) return
+
+    event.preventDefault()
+    handle.setPointerCapture(event.pointerId)
+
+    //? the rect for POSITION is right here - nothing in this layout is transformed
+    const left = panes.getBoundingClientRect().left
+    let width = navWidth
+
+    const move = (e: PointerEvent) => {
+      width = clampWidth(e.clientX - left)
+      setNavWidth(width)
+    }
+    const end = () => {
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', end)
+      handle.removeEventListener('pointercancel', end)
+      writeLibraryPaneWidth(width)
+    }
+
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', end)
+    handle.addEventListener('pointercancel', end)
+  }
+
+  const nudgeWidth = (event: KeyboardEvent) => {
+    const step = event.key === 'ArrowLeft' ? -24 : event.key === 'ArrowRight' ? 24 : 0
+    if (!step) return
+    event.preventDefault()
+    const width = clampWidth(navWidth + step)
+    setNavWidth(width)
+    writeLibraryPaneWidth(width)
+  }
+
+  /* ----- the queue and bulk art ----- */
+
+  /**
+   * Fetch covers for every candidate, one at a time.
    *
-   * A 404 is counted separately from a failure because it means something different and far
-   * more common: that release genuinely has no front cover. Lumping them together would report
-   * a run as broken when it did exactly what it could.
+   * Sequential on purpose. These go out to the Cover Art Archive, which goes unreachable for
+   * minutes at a time, and thirty parallel requests would turn one slow patch into thirty
+   * failures. A 404 is counted apart from a failure: it means that release has no front cover,
+   * which is a fact rather than a fault.
    */
   const fetchAllArt = async () => {
     const targets = artCandidates
@@ -194,20 +366,19 @@ export function LibraryView({ active, onNavigate }: Props) {
     let missing = 0
     let failed = 0
 
-    for (const [index, album] of targets.entries()) {
+    for (const [position, album] of targets.entries()) {
       if (stopBulk.current) break
 
       try {
         await libraryApi.fetchCoverArt(album.path)
         written += 1
       } catch (caught) {
-        //? 404 is "no cover for this release", which is a fact rather than a fault
         if (caught instanceof ApiError && caught.status === 404) missing += 1
         else failed += 1
       }
 
       setBulkArt({
-        total: targets.length, done: index + 1, written, missing, failed, running: true,
+        total: targets.length, done: position + 1, written, missing, failed, running: true,
       })
     }
 
@@ -226,8 +397,7 @@ export function LibraryView({ active, onNavigate }: Props) {
    *
    * Always given the freshly loaded array rather than reading `albums`, because the caller is
    * inside the async continuation of a reload and the state it set has not necessarily been
-   * committed yet. Reading it there is how the editor ended up showing an album that no longer
-   * existed.
+   * committed yet.
    */
   const syncEditing = (fresh: readonly LibraryAlbum[], path: string) => {
     const updated = fresh.find((album) => album.path === path)
@@ -249,13 +419,9 @@ export function LibraryView({ active, onNavigate }: Props) {
     setReview(null)
 
     /*
-     * Reload once on the way out, not on every step.
-     *
-     * Stepping through marks each album reviewed on the server, but the facet counts come from
-     * the scan payload - so without this you close the queue having just cleared the tab badge
-     * while the column still says "newly added 1". Deliberately NOT per step: the walkthrough
-     * works from a snapshot so that "next" can't reorder underneath you, and a scan between
-     * every album would be paying for a list nothing is reading yet.
+     * Reload once on the way out, not on every step. Stepping through marks each album reviewed
+     * on the server, but the facet counts come from the scan payload - so without this you close
+     * the queue having cleared the tab badge while the views still say "newly added 1".
      */
     if (wasReviewing) void reload(false)
   }
@@ -264,27 +430,25 @@ export function LibraryView({ active, onNavigate }: Props) {
     if (!review) return
 
     //? moving on counts as having looked at it, which is what clears a freshly imported album
-    //? from the "something new arrived" prompt. It keeps every issue it had - a queue that
-    //? empties because you glanced at things is a queue that lies.
+    //? from the "something new arrived" prompt. It keeps every issue it had.
     const leaving = review.paths[review.index]
     if (leaving) {
       void libraryApi.markReviewed(leaving).then(recountBadge).catch(() => undefined)
     }
 
-    const index = Math.min(Math.max(review.index + delta, 0), review.paths.length - 1)
-    if (index === review.index) return
+    const position = Math.min(Math.max(review.index + delta, 0), review.paths.length - 1)
+    if (position === review.index) return
 
-    const next = albums.find((album) => album.path === review.paths[index])
+    const next = albums.find((album) => album.path === review.paths[position])
 
-    //? The album has gone - deleted, or renamed by something other than an apply here. There
-    //? is nothing to show, and this is a click rather than a render, so `albums` is settled
-    //? and the absence is real rather than a state update in flight.
+    //? The album has gone - deleted, or renamed by something other than an apply here. This is
+    //? a click rather than a render, so `albums` is settled and the absence is real.
     if (!next) {
       leaveQueue()
       return
     }
 
-    setReview({ ...review, index })
+    setReview({ ...review, index: position })
     setEditing(next)
     setSession((n) => n + 1)
   }
@@ -292,8 +456,6 @@ export function LibraryView({ active, onNavigate }: Props) {
   const ignoreAlbum = async (album: LibraryAlbum, issues: string[]) => {
     await libraryApi.ignoreIssues(album.path, issues)
     recountBadge()
-    //? ignoring changes what the editor should be showing about this album, so it re-resolves
-    //? from the reloaded list rather than sitting on the copy it was opened with
     syncEditing(await reload(false), album.path)
   }
 
@@ -316,281 +478,331 @@ export function LibraryView({ active, onNavigate }: Props) {
   }
 
   const clearFilters = () => {
-    setArtistFilter(null)
     setMultiOnly(false)
     setQueueOnly(false)
     setNewOnly(false)
     setIssueFilter(null)
   }
 
+  /* ----- status ----- */
+
+  const age = formatAge(scannedAt)
+
+  const summaryText = !loaded ? (
+    <Loading label="Reading your library" />
+  ) : stale && loading ? (
+    //? the list is the SAVED scan: say so, and say how old, while the real one catches up
+    <Loading label={`${groups.length} albums from the saved scan${age ? ` (${age})` : ''} · checking for changes`} />
+  ) : loading ? (
+    <Loading label={`${groups.length} albums · rescanning`} />
+  ) : filtering ? (
+    `${visibleGroups.length} of ${groups.length} albums`
+  ) : (
+    `${groups.length} album${groups.length === 1 ? '' : 's'}`
+  )
+
   return (
     <div id="library-content">
-      <div id="library-filter-column" class={filtersCollapsed ? 'collapsed' : undefined}>
-        <div id="library-filter-header">
-          {/* tightened spacing so it can't wrap in a 220px column — see main.css */}
-          <h3 class="text default">Artists</h3>
-          <button
-            type="button"
-            id="library-clear-filters"
-            disabled={!artistFilter && !multiOnly && !queueOnly && !newOnly && !issueFilter}
-            onClick={clearFilters}
-          >
-            Clear
-          </button>
-          <button
-            type="button"
-            class="filter-collapse-toggle"
-            aria-expanded={!filtersCollapsed}
-            title="Show or hide artists"
-            onClick={() => setFiltersCollapsed((on) => !on)}
-          >
-            {filtersCollapsed ? '▾' : '▴'}
-          </button>
-        </div>
-        <hr />
+      <div id="library-toolbar">
+        <input
+          type="search"
+          id="library-filter-input"
+          class="releases-filter-input"
+          placeholder="Search artists, albums and songs…"
+          value={filter}
+          onInput={(event) => setFilter((event.target as HTMLInputElement).value)}
+        />
 
-        {multiEditionCount > 0 && (
-          <button
-            type="button"
-            class={`library-facet${multiOnly ? ' active' : ''}`}
-            onClick={() => setMultiOnly((on) => !on)}
+        <label class="library-sort">
+          <span class="text white-tertiary">Sort</span>
+          <select
+            value={sort}
+            title="Recently changed goes by when each album's folder last changed"
+            onChange={(event) => setSort((event.target as HTMLSelectElement).value as TreeSort)}
           >
-            Multiple editions <span class="library-facet-count">{multiEditionCount}</span>
-          </button>
-        )}
+            <option value="name">By name</option>
+            <option value="recent">Recently changed</option>
+          </select>
+        </label>
+
+        <span id="library-summary" class="text default-muted">{summaryText}</span>
 
         {/*
-          The queue, as facets over the same list rather than a separate view. Only rendered
-          when there is something in it: a permanent "0 need metadata" heading is a heading you
-          stop reading, and then the day it says 12 you don't notice either.
+          The whole point of the queue: start at the first album that needs something and work
+          through them without coming back here between each one. Named for what it will do,
+          including an issue view's narrowing, so it can't surprise you with a hundred albums.
         */}
-        {loaded && (queue.total > 0 || queue.new_imports > 0) && (
-          <div id="library-queue-facets">
-            <h3 class="text default">Metadata</h3>
-
-            {/*
-              The tab badge counts these, so there has to be a way to see WHICH albums it
-              means. Without it the interface said one album wanted attention and then had
-              nowhere to point - a freshly imported album with good tags has no issues, so it
-              appeared in no facet and in no row chip, and the whole section was hidden when
-              nothing else was wrong.
-            */}
-            {queue.new_imports > 0 && (
-              <button
-                type="button"
-                class={`library-facet newly-added${newOnly ? ' active' : ''}`}
-                title="Albums jimbrainz just filed that you haven't looked at yet"
-                onClick={() => setNewOnly((on) => !on)}
-              >
-                newly added <span class="library-facet-count">{queue.new_imports}</span>
-              </button>
-            )}
-
-            {queue.total > 0 && (
-              <button
-                type="button"
-                class={`library-facet needs-attention${queueOnly ? ' active' : ''}`}
-                title="Albums with something missing or off-convention"
-                onClick={() => setQueueOnly((on) => !on)}
-              >
-                Needs attention <span class="library-facet-count">{queue.total}</span>
-              </button>
-            )}
-
-            {issueFacets.map(([code, count]) => (
-              <button
-                key={code}
-                type="button"
-                class={`library-facet library-issue-facet${issueFilter === code ? ' active' : ''}`}
-                title={issueTypes[code]?.hint}
-                onClick={() =>
-                  setIssueFilter((current) => (current === code ? null : code))
-                }
-              >
-                {issueLabel(code, issueTypes)}{' '}
-                <span class="library-facet-count">{count}</span>
-              </button>
-            ))}
-
-            {!reviewTracking && (
-              <p class="text yellow library-queue-note">
-                ignores can't be saved — the job store couldn't be opened, so albums you accept
-                will come back
-              </p>
-            )}
-          </div>
-        )}
-
-        <div class="scrollable" id="library-artists">
-          {artists.map((entry) => (
-            <button
-              key={entry.artist}
-              type="button"
-              class={`library-facet${artistFilter === entry.artist ? ' active' : ''}`}
-              onClick={() =>
-                setArtistFilter((current) => (current === entry.artist ? null : entry.artist))
-              }
-            >
-              {entry.artist} <span class="library-facet-count">{entry.album_count}</span>
-            </button>
-          ))}
-
-          {loaded && !artists.length && (
-            <p class="text default-muted library-empty">Nothing here yet</p>
-          )}
-        </div>
-      </div>
-
-      <div id="library-middle">
-        <div id="library-toolbar">
-          <input
-            type="text"
-            id="library-filter-input"
-            class="releases-filter-input"
-            placeholder="Filter library…"
-            value={filter}
-            onInput={(event) => setFilter((event.target as HTMLInputElement).value)}
-          />
-
-          <span id="library-summary" class="text default-muted">
-            {!loaded ? (
-              <Loading label="Reading your library" />
-            ) : loading ? (
-              //? a rescan keeps the previous list on screen, so this says work is happening
-              //? without the count vanishing out from under you
-              <Loading label={`${groups.length} albums · rescanning`} />
-            ) : visible.length === groups.length ? (
-              `${groups.length} album${groups.length === 1 ? '' : 's'}`
-            ) : (
-              `${visible.length} of ${groups.length} albums`
-            )}
-          </span>
-
-          {/*
-            The whole point of the queue: start at the first album that needs something and
-            work through them without coming back here between each one. Named for what it
-            will actually do, including the narrowing an issue facet applies, so it can't
-            surprise you with a hundred albums when you meant the five missing covers.
-          */}
-          {loaded && waiting.length > 0 && (
-            <button
-              type="button"
-              id="library-review-button"
-              title={
-                issueFilter
-                  ? `work through the ${waiting.length} album(s) with: ${issueLabel(issueFilter, issueTypes)}`
-                  : 'work through every album that needs metadata or has just been added, '
-                    + 'one at a time - stepping past a new one is what marks it seen'
-              }
-              onClick={startReview}
-            >
-              Review {waiting.length}
-              {issueFilter ? ` · ${issueLabel(issueFilter, issueTypes)}` : ''}
-              {!issueFilter && queue.new_imports > 0 ? ` · ${queue.new_imports} new` : ''}
-            </button>
-          )}
-
-          {/*
-            Bulk cover fetch. Labelled with the count so it can't surprise you, and scoped to
-            what is on screen so narrowing to the "no cover art" facet narrows this too.
-          */}
-          {loaded && artCandidates.length > 0 && !bulkArt?.running && (
-            <button
-              type="button"
-              id="library-bulk-art-button"
-              title={`fetch a cover for the ${artCandidates.length} album(s) in view that have a `
-                   + `release but no art - nothing else about them changes`}
-              onClick={() => void fetchAllArt()}
-            >
-              get art · {artCandidates.length}
-            </button>
-          )}
-
-          {bulkArt?.running && (
-            <button
-              type="button"
-              id="library-bulk-art-button"
-              class="is-running"
-              title="Stop after the album currently being fetched"
-              onClick={() => { stopBulk.current = true }}
-            >
-              <Loading label={`${bulkArt.done}/${bulkArt.total} · stop`} />
-            </button>
-          )}
-
+        {loaded && waiting.length > 0 && (
           <button
             type="button"
-            class="columns-toggle-button"
-            disabled={loading}
-            title="Re-read every file, ignoring the cache"
-            onClick={() => reload(true)}
+            id="library-review-button"
+            title={
+              issueFilter
+                ? `work through the ${waiting.length} album(s) with: ${issueLabel(issueFilter, issueTypes)}`
+                : 'work through every album that needs metadata or has just been added, '
+                  + 'one at a time - stepping past a new one is what marks it seen'
+            }
+            onClick={startReview}
           >
-            {/* no label: the button is narrow and the summary beside it already says what
-                is happening */}
-            {loading ? <Loading /> : 'Rescan'}
+            Review {waiting.length}
+            {issueFilter ? ` · ${issueLabel(issueFilter, issueTypes)}` : ''}
+            {!issueFilter && queue.new_imports > 0 ? ` · ${queue.new_imports} new` : ''}
           </button>
-        </div>
+        )}
 
-        <div class="scrollable" id="library-scrollable">
-          {/* the first scan reads tags off every file, so it is worth saying so */}
-          {!loaded && !problem && !error && (
-            <LoadingPanel label="Reading tags from your library…" />
-          )}
+        {loaded && artCandidates.length > 0 && !bulkArt?.running && (
+          <button
+            type="button"
+            id="library-bulk-art-button"
+            class="win-button"
+            title={`fetch a cover for the ${artCandidates.length} album(s) in view that have a `
+                 + 'release but no art - nothing else about them changes'}
+            onClick={() => void fetchAllArt()}
+          >
+            Get covers · {artCandidates.length}
+          </button>
+        )}
 
-          {/*
-            An unconfigured LIBRARY_PATH is a setup step, not a failure - say which knob to
-            turn rather than rendering an empty list that looks like a broken scan.
-          */}
-          {problem && <h4 class="text yellow library-status">{problem}</h4>}
+        {bulkArt?.running && (
+          <button
+            type="button"
+            id="library-bulk-art-button"
+            class="win-button is-running"
+            title="Stop after the album currently being fetched"
+            onClick={() => { stopBulk.current = true }}
+          >
+            <Loading label={`${bulkArt.done}/${bulkArt.total} · stop`} />
+          </button>
+        )}
 
-          {error && <h4 class="text red library-status">{error}</h4>}
+        <button
+          type="button"
+          class="win-button"
+          disabled={loading && !stale}
+          title="Re-read every file, ignoring the cache - for when something changed that jimbrainz couldn't see, like a retag by another program"
+          onClick={() => void reload(true)}
+        >
+          Rescan
+        </button>
+      </div>
 
-          {!problem && !error && loaded && !albums.length && (
-            <h4 class="text default-muted library-status">
-              nothing found in {libraryPath || 'your library'} — downloads appear here once
-              they've been organized
-            </h4>
-          )}
+      <div
+        id="library-panes"
+        ref={panesRef}
+        style={`--library-nav-width:${navWidth}px`}
+      >
+        <nav id="library-nav" aria-label="Library">
+          <div id="library-views" class={viewsCollapsed ? 'collapsed' : undefined}>
+            <div class="nav-heading">
+              <span>Views</span>
+              <button
+                type="button"
+                id="library-clear-filters"
+                disabled={!facetOn}
+                onClick={clearFilters}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                class="filter-collapse-toggle"
+                aria-expanded={!viewsCollapsed}
+                title="Show or hide the views"
+                onClick={() => setViewsCollapsed((on) => !on)}
+              >
+                {viewsCollapsed ? '▾' : '▴'}
+              </button>
+            </div>
 
-          {!problem && !error && loaded && albums.length > 0 && !visible.length && (
-            <h4 class="text default-muted library-status">Nothing matches that filter</h4>
-          )}
+            <div class="library-views-list">
+              <button
+                type="button"
+                class={`library-facet${!facetOn ? ' active' : ''}`}
+                onClick={clearFilters}
+              >
+                All albums <span class="library-facet-count">{groups.length}</span>
+              </button>
 
-          {visible.map((group) => (
-            <LibraryAlbumRow
-              key={group.key}
-              group={group}
+              {multiEditionCount > 0 && (
+                <button
+                  type="button"
+                  class={`library-facet${multiOnly ? ' active' : ''}`}
+                  onClick={() => setMultiOnly((on) => !on)}
+                >
+                  Multiple editions <span class="library-facet-count">{multiEditionCount}</span>
+                </button>
+              )}
+
+              {/*
+                The tab badge counts these, so there has to be a way to see WHICH albums it means.
+                A freshly imported album with good tags has no issues, so without this it would be
+                counted by the badge and shown nowhere.
+              */}
+              {loaded && queue.new_imports > 0 && (
+                <button
+                  type="button"
+                  class={`library-facet newly-added${newOnly ? ' active' : ''}`}
+                  title="Albums jimbrainz just filed that you haven't looked at yet"
+                  onClick={() => setNewOnly((on) => !on)}
+                >
+                  Newly added <span class="library-facet-count">{queue.new_imports}</span>
+                </button>
+              )}
+
+              {/*
+                Only rendered when there is something in it: a permanent "0 need metadata" is a
+                line you stop reading, and then the day it says 12 you don't notice either.
+              */}
+              {loaded && queue.total > 0 && (
+                <button
+                  type="button"
+                  class={`library-facet needs-attention${queueOnly ? ' active' : ''}`}
+                  title="Albums with something missing or off-convention"
+                  onClick={() => setQueueOnly((on) => !on)}
+                >
+                  Needs attention <span class="library-facet-count">{queue.total}</span>
+                </button>
+              )}
+
+              {loaded && issueFacets.map(([code, count]) => (
+                <button
+                  key={code}
+                  type="button"
+                  class={`library-facet library-issue-facet${issueFilter === code ? ' active' : ''}`}
+                  title={issueTypes[code]?.hint}
+                  onClick={() => setIssueFilter((current) => (current === code ? null : code))}
+                >
+                  {issueLabel(code, issueTypes)}{' '}
+                  <span class="library-facet-count">{count}</span>
+                </button>
+              ))}
+
+              {!reviewTracking && (
+                <p class="text yellow library-queue-note">
+                  ignores can't be saved — the job store couldn't be opened, so albums you accept
+                  will come back
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div class="nav-heading nav-heading-artists">
+            <span>Artists</span>
+            <span class="library-facet-count">{artists.length}</span>
+          </div>
+
+          <div class="scrollable" id="library-tree-scroll">
+            {!loaded && !problem && !error && (
+              <LoadingPanel label="Reading tags from your library…" />
+            )}
+
+            {/*
+              An unconfigured LIBRARY_PATH is a setup step, not a failure - say which knob to turn
+              rather than rendering an empty tree that looks like a broken scan.
+            */}
+            {problem && <p class="text yellow library-status">{problem}</p>}
+            {error && <p class="text red library-status">{error}</p>}
+
+            {!problem && !error && loaded && !albums.length && (
+              <p class="text default-muted library-status">
+                nothing found in {libraryPath || 'your library'} — downloads appear here once
+                they've been organized
+              </p>
+            )}
+
+            {!problem && loaded && albums.length > 0 && !visibleGroups.length && (
+              <p class="text default-muted library-status">Nothing matches that</p>
+            )}
+
+            <LibraryTree
+              rows={rows}
+              selected={selectedId}
+              focusToken={focusToken}
+              revealToken={revealToken}
               issueTypes={issueTypes}
-              onSearchArtist={searchArtist}
-              onSearchAlbum={searchAlbum}
-              onEdit={setEditing}
-              onDelete={setDeleting}
-              /* the server dropped the folder from its scan cache when it wrote the cover, so
-                 a plain reload picks up the new art_mtime and the URL changes with it */
-              onArtFetched={() => void reload(false)}
+              onActivate={activate}
+              onSelect={selectFromKeyboard}
+              onToggle={setOpen}
             />
-          ))}
+          </div>
+        </nav>
 
-          {/*
-            What the run actually did. "No cover on the Archive" is reported apart from "the
-            request failed" because they are different facts - the first is about the release
-            and nothing can be done, the second is worth trying again.
-          */}
-          {bulkArt && !bulkArt.running && (
-            <p class="text default-muted library-bulk-summary">
-              fetched {bulkArt.written} cover{bulkArt.written === 1 ? '' : 's'}
-              {bulkArt.missing ? `, ${bulkArt.missing} had none on the Archive` : ''}
-              {bulkArt.failed ? `, ${bulkArt.failed} failed - try those again` : ''}
-              {bulkArt.done < bulkArt.total ? ` (stopped at ${bulkArt.done} of ${bulkArt.total})` : ''}
-            </p>
-          )}
+        <div
+          class="library-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the tree"
+          aria-valuenow={navWidth}
+          tabIndex={0}
+          title="Drag to resize · double-click to reset"
+          onPointerDown={(event) => startDrag(event as unknown as PointerEvent)}
+          onKeyDown={(event) => nudgeWidth(event as unknown as KeyboardEvent)}
+          onDblClick={() => {
+            setNavWidth(DEFAULT_NAV_WIDTH)
+            writeLibraryPaneWidth(DEFAULT_NAV_WIDTH)
+          }}
+        />
 
-          {loaded && albums.length > 0 && (
-            <p class="text white-tertiary library-scan-note">
-              scanned in {scanSeconds}s
-            </p>
-          )}
-        </div>
+        <section
+          id="library-details"
+          aria-label="Details"
+          class={sheetOpen && selected.kind !== 'none' ? 'is-open' : undefined}
+        >
+          <LibraryDetails
+            selected={selected}
+            selectedId={selectedId}
+            details={trackDetails}
+            issueTypes={issueTypes}
+            groups={groups}
+            summary={{
+              albums: groups.length,
+              artists: allArtists.length,
+              tracks: totals.tracks,
+              size: totals.size,
+              duration: totals.duration,
+              libraryPath,
+              scannedAt,
+              stale,
+            }}
+            onSelect={selectFromPane}
+            onEdit={setEditing}
+            onDelete={setDeleting}
+            /* the server dropped the folder from its scan cache when it wrote the cover, so a
+               plain reload picks up the new art_mtime and the URL changes with it */
+            onArtFetched={() => void reload(false)}
+            onSearchArtist={searchArtist}
+            onSearchAlbum={searchAlbum}
+            onBack={() => setSheetOpen(false)}
+          />
+        </section>
+      </div>
+
+      {/* Explorer's status bar: what is here, and how old the view of it is */}
+      <div id="library-statusbar" role="status">
+        <span>{groups.length} albums</span>
+        <span>{allArtists.length} artists</span>
+        <span>{totals.tracks} tracks</span>
+        {totals.size > 0 && <span>{formatSize(totals.size)}</span>}
+
+        {/*
+          What the last bulk run did. "No cover on the Archive" is kept apart from "the request
+          failed": the first is a fact about the release, the second is worth trying again.
+        */}
+        {bulkArt && !bulkArt.running && (
+          <span class="statusbar-note">
+            fetched {bulkArt.written} cover{bulkArt.written === 1 ? '' : 's'}
+            {bulkArt.missing ? `, ${bulkArt.missing} had none on the Archive` : ''}
+            {bulkArt.failed ? `, ${bulkArt.failed} failed - try those again` : ''}
+            {bulkArt.done < bulkArt.total ? ` (stopped at ${bulkArt.done} of ${bulkArt.total})` : ''}
+          </span>
+        )}
+
+        <span class="statusbar-spacer" />
+        <span title={scannedAt ? new Date(scannedAt * 1000).toLocaleString() : undefined}>
+          {stale
+            ? `Saved scan from ${age || 'an earlier visit'}`
+            : scannedAt ? `Scanned ${age}${scanSeconds ? ` in ${scanSeconds}s` : ''}` : ''}
+        </span>
       </div>
 
       {deleting && (
@@ -625,18 +837,24 @@ export function LibraryView({ active, onNavigate }: Props) {
           onUnignore={unignoreAlbum}
           /*
             The retag already dropped this folder from the server's cache, so a plain reload
-            picks up the new tags and path without a full rescan - but the editor is holding
-            the album object it was opened with, which is now stale in every field that just
-            changed. Re-resolve it by its new path so the open editor shows what it did.
+            picks up the new tags and path without a full rescan - but the editor is holding the
+            album object it was opened with, which is now stale in every field that just changed.
+            Re-resolve it by its new path so the open editor shows what it did.
           */
           onApplied={async (newPath) => {
+            const oldPath = editing.path
             const fresh = await reload(false)
             recountBadge()
-            syncEditing(fresh, newPath)
+            const updated = syncEditing(fresh, newPath)
 
-            //? the queue is holding paths and this album's has just changed under it, so its
-            //? entry moves too - otherwise stepping back to it later would look for a folder
-            //? that was renamed out from under the list
+            //? the details pane follows the album to its new folder, rather than falling back
+            //? to the overview because the path it was showing no longer exists
+            if (updated && selectedAlbum?.path === oldPath) {
+              const group = groupAlbums(fresh).find((g) => g.editions.some((e) => e.path === newPath))
+              if (group) setSelectedId(nodeIdForAlbum(updated, group))
+            }
+
+            //? the queue is holding paths and this album's has just changed under it
             if (review) {
               setReview((current) => current && {
                 ...current,

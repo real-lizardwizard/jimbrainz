@@ -13,7 +13,7 @@ the how.
 | Downloads panel | **ported**, verified against a running backend with seeded jobs. |
 | Tab shell | **done** — `Tabs.tsx`. Search/Library, built to take Settings as a third. |
 | Metadata editor | **done** — `MetadataEditor.tsx`, an overlay from the library reusing the candidates-window shape. Pick a release *or* type the fields directly; the release the album is already tagged with sorts first and is badged `current`. |
-| Library window | **done** — `LibraryView.tsx` + `src/library.py`. One row per album, editions nested under it, same as release-group → releases in search. |
+| Library window | **done** — `LibraryView.tsx` + `src/library.py`. An Explorer-style tree (`LibraryTree.tsx`, `lib/libraryTree.ts`: artist → album → edition → track) beside a details pane (`LibraryDetails.tsx`) with a user-chosen set of track fields. Replaced the one-row-per-album list in v0.6.5. |
 | Multi-stage Dockerfile | **done** — `ui` stage builds into `interface/dist`. |
 | Cache-header fix | **done** — hashed chunks immutable, entry bundle revalidates. |
 | Everything else | untouched. Vanilla still owns it. |
@@ -165,7 +165,7 @@ drop it.
 
 | # | component | source | notes |
 | --- | --- | --- | --- |
-| 1 | ~~**Library window**~~ | *new* | **done.** `LibraryView.tsx` + `src/library.py`. Edition-aware; artist/album names hand off to a search through the bridge. |
+| 1 | ~~**Library window**~~ | *new* | **done.** `LibraryView.tsx` + `src/library.py`. Edition-aware; artist/album names hand off to a search through the bridge. Rebuilt as a tree + details pane in v0.6.5. |
 | 2 | ~~Downloads panel~~ | ~~`renderDownloads` + 81 lines of manual reconciliation~~ | **done.** `key={job.id}` deleted all of it. Went first; see ground rule 2. |
 | 3 | Candidates panel | `renderCandidates`, filters, signal sliders | self-contained |
 | 4 | Filter column | `renderFacets`, tri-state facets | |

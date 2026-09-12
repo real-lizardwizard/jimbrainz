@@ -887,20 +887,24 @@ document.getElementById('candidates-requery-button').addEventListener('click', (
 
 function buildExpectedFromRelease(release, releaseGroupContext) {
     // MusicBrainz numbers tracks per-disc, so a 2xCD set has two "track 1"s. The matcher keys
-    // its file mapping on position, so flatten to a running number across all discs.
+    // its file mapping on position, so flatten to a running number across all discs - and keep
+    // the per-disc numbering alongside, because that is what a multi-disc release is TAGGED
+    // with (see organizer.tag_values). Same shape as flattenTracks() in ui/src/lib/release.ts.
     const tracks = [];
     let position = 0;
 
-    for (const disc of (release.media || [])) {
-        for (const track of (disc.tracks || [])) {
+    (release.media || []).forEach((medium, discIndex) => {
+        (medium.tracks || []).forEach((track, trackIndex) => {
             position += 1;
             tracks.push({
                 position,
                 title: track.recording?.title || track.title || '',
                 length_ms: track.recording?.length ?? track.length ?? null,
+                disc: medium.position ?? discIndex + 1,
+                disc_position: track.position ?? trackIndex + 1,
             });
-        }
-    }
+        });
+    });
 
     const rawDate = release['release-events']?.[0]?.date || release.date || '';
     const labelInfo = (release['label-info'] || [])
