@@ -162,6 +162,8 @@ Albums you hold more than one version of say so on their own row ("3 editions"),
 <br><br>
 The search box matches song titles as well as artists and albums: type a song and the tree opens its album to show you where it is.
 <br><br>
+You can arrange it by artist, album, release date or date added, either way round. By artist it's the tree above; the other three list albums directly under headings (a letter, a year, a month), like Windows 7's music library did. "Date added" goes by when jimbrainz first saw an album, or its folder's date if that's earlier, so a library that was there before jimbrainz still sorts sensibly.
+<br><br>
 The track list shows <em>whichever fields you want</em>. A Fields menu (or right-clicking the column headers) switches columns on and off: track and disc number, artist, genre, composer, label, catalogue number, ISRC, bitrate, sample rate, bit depth, channels, the MusicBrainz ids, and more. Pick a single track and those same fields list down the pane, with every other tag the file carries underneath. Track details are read from the files when you look at them, so they show what's on disk now even if something other than jimbrainz changed the tags.
 <br><br>
 Multi-disc sets run disc by disc under "Disc 1", "Disc 2" headings, rather than dealing the two discs out alternately because both start at track 1.

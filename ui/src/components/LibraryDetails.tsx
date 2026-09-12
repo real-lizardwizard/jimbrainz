@@ -7,7 +7,7 @@ import { useTrackFields } from '../hooks/useTrackFields'
 import { formatAge, formatDuration, formatSize, trackTime } from '../lib/format'
 import type { AlbumGroup } from '../lib/groupAlbums'
 import {
-  editionNodeId, groupNodeId, nodeIdForAlbum, trackNodeId, type Selected,
+  editionNodeId, groupAddedAt, groupNodeId, nodeIdForAlbum, trackNodeId, type Selected,
 } from '../lib/libraryTree'
 import { isNewImport, outstandingIssues } from '../lib/metadataQueue'
 import {
@@ -745,13 +745,10 @@ function Overview(
   { summary, groups, onSelect }:
   { summary: LibrarySummary; groups: readonly AlbumGroup[]; onSelect: (id: string) => void },
 ) {
-  //? the newest folders - the question you usually have when you open the library without a
-  //? particular album in mind is "what just arrived"
+  //? the question you usually have when you open the library without a particular album in mind
+  //? is "what just arrived" - judged by the same clock as the "Date added" arrangement
   const recent = useMemo(
-    () => [...groups]
-      .sort((a, b) =>
-        Math.max(...b.editions.map((e) => e.modified_at)) - Math.max(...a.editions.map((e) => e.modified_at)))
-      .slice(0, 12),
+    () => [...groups].sort((a, b) => groupAddedAt(b) - groupAddedAt(a)).slice(0, 12),
     [groups],
   )
 
@@ -778,7 +775,7 @@ function Overview(
 
       {recent.length > 0 && (
         <>
-          <h3 class="details-subheading">Recently changed</h3>
+          <h3 class="details-subheading">Recently added</h3>
           <CoverGrid groups={recent} showArtist onSelect={onSelect} />
         </>
       )}

@@ -512,6 +512,19 @@ full-width album cards (`LibraryAlbumRow`, deleted), whose middle was mostly emp
   three closed artists would make you open each one); what you close is remembered until the
   filter changes. **The search matches song titles** from two characters, and an album opened
   only by a song match shows just the matching songs - opening it by hand shows them all.
+- **Four arrangements, and three of them drop the artist level** (v0.6.6, asked for: release
+  date, album name, artist name, date added). Sorting artist folders by an album's release date
+  means nothing, so by album / release date / date added the tree lists albums directly under
+  group headings - initial, year, month - the way Windows 7's music library did "Arrange by".
+  Each sort starts its natural way round (names A-Z, release date oldest first like the search
+  tab, date added newest first) and one button flips it; the choice is saved in
+  `jimbrainz-library-sort` and validated on read. Undated albums sink in both directions.
+- **"Date added" is the EARLIER of `first_seen` and the folder's mtime** (`albumAddedAt`).
+  `first_seen` is exact for anything since install, but every album present on the first scan
+  shares that one moment; the folder mtime spreads those out but moves when a cover is added.
+  Neither alone is honest, and the earlier of the two is right in both cases. An album group
+  takes its NEWEST edition's date, so a deluxe press that arrived today is news. The overview's
+  "Recently added" shelf uses the same clock.
 - **The selection index covers the whole library, not the filtered tree**, so what you picked
   stays in the pane while you narrow the tree instead of blanking the moment it stops matching.
 - **Tree and pane share one selection, with two ways to follow it.** A keyboard move takes
@@ -669,6 +682,13 @@ stay; the CRT overlay, the text-glow and the ░▒▓ chrome go.
   the UI uses the platform's own stacks; the `.otf` files are still on disk and in git. This
   app is self-hosted and often runs with no internet at all, so a webfont CDN was never an
   option — local stacks are the only honest choice, and they cost nothing to load.
+  **But know what those files ARE before reviving them:** their name table reads "TX-02" and
+  "Berkeley Mono ... Copyright 2022-2024, U.S. Graphics LLC. All Rights Reserved", and the
+  `SCT.nfo` beside them is a scene release note. That is a commercial font, not licensed for
+  redistribution, sitting in a public repo. Found in v0.6.6 while listing font options; flagged
+  to James and deliberately NOT deleted, because removing it (and whether to scrub history) is
+  the owner's call. If a bundled face is wanted, use an openly licensed one (see the options
+  page for IBM Plex / JetBrains Mono / Noto Sans), or buy Berkeley Mono.
 - **The wordmark is figlet-style ASCII art and therefore needs `--font-mono`.** It used to
   inherit a *proportional* face, which is why the letterforms never quite lined up.
 - **The foundation layer at the top of `main.css` is written with `:where()`, so it carries
@@ -693,6 +713,16 @@ stay; the CRT overlay, the text-glow and the ░▒▓ chrome go.
   WINDOWS 7", just above the responsive blocks) - so it can be dialled back from the tokens,
   the same arrangement as the glow tokens. A full light-and-blue Aero palette would be a
   different theme, not a touch; don't drift there without being asked.
+- **Checkboxes, not switches (v0.6.6), for every checkbox in the app.** The settings tab's
+  sliding switches were the one phone idiom left; they are plain checkboxes now, drawn by one
+  `input[type="checkbox"]` rule in the Windows 7 block (a sunken square, a gloss on hover, a
+  drawn tick) so the vanilla candidate filters and the editor's boxes match them. In a settings
+  row the box sits BEFORE its label (`.settings-row:has(.settings-check)`), where a desktop
+  checkbox lives. Radios got the same well, round with a dot, so the settings tab's format
+  choice matches. The old `accent-color` rules on individual inputs are inert now. The
+  `#format-preference-select` rules in main.css are DEAD - that element left with the v0.5
+  profile dropdown and exists nowhere in the markup or scripts - so they don't need to stay
+  in step with the shared rule; they need deleting when someone next tidies that corner.
 - **Accent is spent, not sprinkled.** Solid purple fills appear on exactly two controls:
   Search, and the metadata editor's Apply. Apply writes tags to disk and renames a folder
   with no undo, so it must not look like the Cancel button beside it. Everything purple used

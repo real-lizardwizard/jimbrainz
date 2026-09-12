@@ -84,7 +84,13 @@ function Row({
   )
 }
 
-function Toggle({
+/**
+ * A plain checkbox. It was a sliding switch; James asked for checkboxes "to keep with the
+ * nostalgic theme", and the switch was the one control on the page that said phone rather than
+ * desktop. The row puts it BEFORE its label (see .settings-row:has(.settings-check)), where a
+ * desktop checkbox lives, rather than off at the far edge where the switch sat.
+ */
+function Checkbox({
   id,
   checked,
   onChange,
@@ -97,7 +103,7 @@ function Toggle({
     <input
       id={id}
       type="checkbox"
-      class="settings-toggle"
+      class="settings-check"
       checked={checked}
       onChange={(e) => onChange((e.currentTarget as HTMLInputElement).checked)}
     />
@@ -390,7 +396,7 @@ export function SettingsView({ active }: { active: boolean }) {
             hint="Queue the top-ranked candidate immediately instead of opening the panel to choose"
             htmlFor="pref-auto-grab"
             control={
-              <Toggle
+              <Checkbox
                 id="pref-auto-grab"
                 checked={shownDefaults.autoGrab}
                 onChange={(v) => editDefault('autoGrab', v)}
@@ -403,7 +409,7 @@ export function SettingsView({ active }: { active: boolean }) {
             hint="Ask first when cancelling a transfer that's already running"
             htmlFor="pref-confirm-cancel"
             control={
-              <Toggle
+              <Checkbox
                 id="pref-confirm-cancel"
                 checked={shownPrefs.confirmCancel}
                 onChange={(v) => editPref('confirmCancel', v)}
@@ -441,7 +447,7 @@ export function SettingsView({ active }: { active: boolean }) {
             hint="Excludes live albums, compilations, interviews and demos from the query — which is what makes it worth doing, since MusicBrainz spends the limit on whatever matches"
             htmlFor="pref-studio-only"
             control={
-              <Toggle
+              <Checkbox
                 id="pref-studio-only"
                 checked={shownPrefs.searchStudioOnly}
                 onChange={(v) => editPref('searchStudioOnly', v)}
@@ -484,7 +490,7 @@ export function SettingsView({ active }: { active: boolean }) {
             hint="Only peers who can start sending now, rather than queueing you"
             htmlFor="pref-free-slot"
             control={
-              <Toggle
+              <Checkbox
                 id="pref-free-slot"
                 checked={shownPrefs.candidateFreeSlotOnly}
                 onChange={(v) => editPref('candidateFreeSlotOnly', v)}
@@ -497,7 +503,7 @@ export function SettingsView({ active }: { active: boolean }) {
             hint="Candidates holding at least as many tracks as the release you picked"
             htmlFor="pref-complete-only"
             control={
-              <Toggle
+              <Checkbox
                 id="pref-complete-only"
                 checked={shownPrefs.candidateCompleteOnly}
                 onChange={(v) => editPref('candidateCompleteOnly', v)}
@@ -512,7 +518,7 @@ export function SettingsView({ active }: { active: boolean }) {
             hint="Useful while you're still confirming a new install is behaving"
             htmlFor="pref-log-open"
             control={
-              <Toggle
+              <Checkbox
                 id="pref-log-open"
                 checked={shownPrefs.logOpenOnStart}
                 onChange={(v) => editPref('logOpenOnStart', v)}

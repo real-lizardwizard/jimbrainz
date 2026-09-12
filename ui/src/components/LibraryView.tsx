@@ -9,11 +9,13 @@ import { useTrackDetails } from '../hooks/useTrackDetails'
 import { formatAge, formatSize } from '../lib/format'
 import { groupAlbums, type AlbumGroup } from '../lib/groupAlbums'
 import {
-  ancestorsOf, groupArtists, indexTree, nodeIdForAlbum, trackNodeId, visibleRows,
-  type Selected, type TreeSort,
+  ancestorsOf, arrange, DEFAULT_DIRECTION, groupArtists, indexTree, nodeIdForAlbum, trackNodeId,
+  TREE_SORTS, visibleRows, type Selected, type SortDirection, type TreeSort,
 } from '../lib/libraryTree'
 import { isNewImport, issueLabel, queueAlbums } from '../lib/metadataQueue'
-import { readLibraryPaneWidth, writeLibraryPaneWidth } from '../state/persisted'
+import {
+  readLibraryPaneWidth, readLibrarySort, writeLibraryPaneWidth, writeLibrarySort,
+} from '../state/persisted'
 import { DeleteAlbumDialog } from './DeleteAlbumDialog'
 import { LibraryDetails } from './LibraryDetails'
 import { LibraryTree, type NodeRow } from './LibraryTree'
@@ -50,6 +52,36 @@ const MIN_DETAILS_WIDTH = 340
 
 const EMPTY: ReadonlySet<string> = new Set()
 
+//? Windows 7's music library called this "Arrange by", and it is the right name: three of the
+//? four don't just reorder the tree, they take the artist level away
+const SORT_LABELS: Record<TreeSort, string> = {
+  artist: 'Artist', album: 'Album', released: 'Release date', added: 'Date added',
+}
+
+const SORT_HINTS: Record<TreeSort, string> = {
+  artist: "Artists A-Z, and each artist's albums in the order they came out",
+  album: "Every album by title, whoever it's by",
+  released: "The album's own year - the earliest of the editions you hold",
+  added: "When jimbrainz first saw each album, or its folder's date if that's earlier",
+}
+
+const DIRECTION_LABELS: Record<TreeSort, Record<SortDirection, string>> = {
+  artist: { asc: 'A–Z', desc: 'Z–A' },
+  album: { asc: 'A–Z', desc: 'Z–A' },
+  released: { asc: 'Oldest first', desc: 'Newest first' },
+  added: { asc: 'Oldest first', desc: 'Newest first' },
+}
+
+/** The saved arrangement, validated - it is JSON a user can edit and an old version may have written. */
+function initialOrder(): { sort: TreeSort; direction: SortDirection } {
+  const saved = readLibrarySort()
+  const sort = TREE_SORTS.find((s) => s === saved?.sort) ?? 'artist'
+  const direction = saved?.direction === 'asc' || saved?.direction === 'desc'
+    ? saved.direction
+    : DEFAULT_DIRECTION[sort]
+  return { sort, direction }
+}
+
 /**
  * What's already on disk, laid out like a file explorer.
  *
@@ -77,7 +109,12 @@ export function LibraryView({ active, onNavigate }: Props) {
   const [issueFilter, setIssueFilter] = useState<string | null>(null)
   /** Only albums jimbrainz just filed that haven't been looked at — what the tab badge counts. */
   const [newOnly, setNewOnly] = useState(false)
-  const [sort, setSort] = useState<TreeSort>('name')
+  const [order, setOrderState] = useState(initialOrder)
+  const { sort, direction } = order
+  const setOrder = (next: { sort: TreeSort; direction: SortDirection }) => {
+    setOrderState(next)
+    writeLibrarySort(next)
+  }
   /*
    * Only has any effect on a phone, where CSS both reveals the toggle and acts on the class.
    * Starts collapsed because on a phone the views above the tree push the first artist most of
@@ -157,8 +194,13 @@ export function LibraryView({ active, onNavigate }: Props) {
   const groups = useMemo(() => groupAlbums(albums), [albums])
 
   //? every node, filtered or not, so a selection survives being filtered out of the tree
-  const allArtists = useMemo(() => groupArtists(groups, sort, isNewImport), [groups, sort])
+  const allArtists = useMemo(() => groupArtists(groups, isNewImport), [groups])
   const index = useMemo(() => indexTree(allArtists), [allArtists])
+  //? the whole library in the current arrangement, for opening the tree down to a selection
+  const fullLayout = useMemo(
+    () => arrange(groups, sort, direction, isNewImport),
+    [groups, sort, direction],
+  )
 
   const needle = filter.trim().toLowerCase()
   const facetOn = multiOnly || queueOnly || newOnly || issueFilter !== null
@@ -204,14 +246,17 @@ export function LibraryView({ active, onNavigate }: Props) {
     return { visibleGroups: kept, trackMatches: matches as ReadonlySet<string> }
   }, [groups, needle, multiOnly, queueOnly, newOnly, issueFilter])
 
-  const artists = useMemo(() => groupArtists(visibleGroups, sort, isNewImport), [visibleGroups, sort])
+  const layout = useMemo(
+    () => arrange(visibleGroups, sort, direction, isNewImport),
+    [visibleGroups, sort, direction],
+  )
 
   //? a new filter opens every match afresh; what you closed under the last one doesn't carry over
   useEffect(() => setClosed(EMPTY), [needle, multiOnly, queueOnly, newOnly, issueFilter])
 
   const rows = useMemo(
-    () => visibleRows(artists, { expanded, closedWhileFiltering: closed, filtering, trackMatches }),
-    [artists, expanded, closed, filtering, trackMatches],
+    () => visibleRows(layout, { expanded, closedWhileFiltering: closed, filtering, trackMatches }),
+    [layout, expanded, closed, filtering, trackMatches],
   )
 
   const selected: Selected = (selectedId ? index.get(selectedId) : undefined) ?? { kind: 'none' }
@@ -288,7 +333,7 @@ export function LibraryView({ active, onNavigate }: Props) {
   /** Something in the details pane was picked: select it, and open the tree down to it. */
   const selectFromPane = (id: string) => {
     setSelectedId(id)
-    const ancestors = ancestorsOf(id, allArtists)
+    const ancestors = ancestorsOf(id, fullLayout)
     if (ancestors.length) {
       setExpanded((current) => new Set([...current, ...ancestors]))
       setClosed((current) => new Set([...current].filter((c) => !ancestors.includes(c))))
@@ -513,17 +558,29 @@ export function LibraryView({ active, onNavigate }: Props) {
           onInput={(event) => setFilter((event.target as HTMLInputElement).value)}
         />
 
-        <label class="library-sort">
-          <span class="text white-tertiary">Sort</span>
+        <div class="library-sort">
+          <label class="text white-tertiary" for="library-sort-select">Arrange by</label>
           <select
+            id="library-sort-select"
             value={sort}
-            title="Recently changed goes by when each album's folder last changed"
-            onChange={(event) => setSort((event.target as HTMLSelectElement).value as TreeSort)}
+            title={SORT_HINTS[sort]}
+            onChange={(event) => {
+              const next = (event.target as HTMLSelectElement).value as TreeSort
+              //? each sort starts its own natural way round - names A-Z, date added newest first
+              setOrder({ sort: next, direction: DEFAULT_DIRECTION[next] })
+            }}
           >
-            <option value="name">By name</option>
-            <option value="recent">Recently changed</option>
+            {TREE_SORTS.map((s) => <option key={s} value={s}>{SORT_LABELS[s]}</option>)}
           </select>
-        </label>
+          <button
+            type="button"
+            class="win-button library-sort-direction"
+            title="Reverse the order"
+            onClick={() => setOrder({ sort, direction: direction === 'asc' ? 'desc' : 'asc' })}
+          >
+            {DIRECTION_LABELS[sort][direction]}
+          </button>
+        </div>
 
         <span id="library-summary" class="text default-muted">{summaryText}</span>
 
@@ -687,8 +744,10 @@ export function LibraryView({ active, onNavigate }: Props) {
           </div>
 
           <div class="nav-heading nav-heading-artists">
-            <span>Artists</span>
-            <span class="library-facet-count">{artists.length}</span>
+            <span>{layout.by === 'artist' ? 'Artists' : 'Albums'}</span>
+            <span class="library-facet-count">
+              {layout.by === 'artist' ? layout.artists.length : layout.groups.length}
+            </span>
           </div>
 
           <div class="scrollable" id="library-tree-scroll">

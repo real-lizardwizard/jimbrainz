@@ -30,6 +30,8 @@ export const STORAGE_KEYS = {
   libraryFields: 'jimbrainz-library-fields',
   /** Where the library's splitter sits: the tree pane's width in px. */
   libraryPaneWidth: 'jimbrainz-library-pane-width',
+  /** How the library tree is arranged, and which way round. */
+  librarySort: 'jimbrainz-library-sort',
 } as const
 
 /*
@@ -187,6 +189,22 @@ export function readLibraryPaneWidth(): number | null {
 
 export function writeLibraryPaneWidth(width: number): void {
   writeRaw(STORAGE_KEYS.libraryPaneWidth, String(Math.round(width)))
+}
+
+/* ===== jimbrainz-library-sort ===== */
+
+/**
+ * Returned as plain strings on purpose: this is JSON a user can edit and an older version may
+ * have written, so the library view validates both against the sorts that exist today.
+ */
+export function readLibrarySort(): { sort: string; direction: string } | null {
+  const saved = readJson<{ sort?: unknown; direction?: unknown }>(STORAGE_KEYS.librarySort)
+  if (!saved || typeof saved.sort !== 'string' || typeof saved.direction !== 'string') return null
+  return { sort: saved.sort, direction: saved.direction }
+}
+
+export function writeLibrarySort(value: { sort: string; direction: string }): void {
+  writeRaw(STORAGE_KEYS.librarySort, JSON.stringify(value))
 }
 
 /* ===== jimbrainz-preferences ===== */
